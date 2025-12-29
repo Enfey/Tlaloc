@@ -1,0 +1,77 @@
+# Build dirs
+build/
+build-*/
+out/
+cmake-build-*/
+
+# Artifacts
+*.tmp
+*.bak
+*.orig
+*.swp
+*~
+# Objects
+*.o
+*.obj
+*.ko
+*.elf
+
+# Libs
+*.lib
+*.a
+*.la
+*.lo
+*.so
+*.so.*
+*.dylib
+
+# Exec
+*.exe
+*.out
+*.app
+
+# CMake
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+*.cmake
+!CMakeLists.txt
+
+# Ninja
+.ninja_deps
+.ninja_log
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+*.code-workspace
+
+# Debug
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Clangd
+.cache/
+compile_flags.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+/tmp/
+*.log
+
+# Coverage
+*.gcno
+*.gcda
+*.gcov
+coverage/
