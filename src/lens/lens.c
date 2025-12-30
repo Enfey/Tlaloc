@@ -35,6 +35,26 @@
 #include <sys/mman.h>
 #include <errno.h>
 
+/* Not present in older glibc distributions - must provide ourselves */
+#ifndef NT_ARM_SSVE
+#define NT_ARM_SSVE 0x40b
+#endif
+#ifndef NT_ARM_ZA
+#define NT_ARM_ZA 0x40c
+#endif
+#ifndef NT_ARM_ZT
+#define NT_ARM_ZT 0x40d
+#endif
+#ifndef NT_ARM_FPMR
+#define NT_ARM_FPMR 0x40e
+#endif
+#ifndef NT_ARM_POE
+#define NT_ARM_POE 0x40f
+#endif
+#ifndef NT_ARM_GCS
+#define NT_ARM_GCS 0x410
+#endif
+
 /* Variadic, do while(0) expands the macro to a single statement syntactically so it can be used in if/else. Defensively programmed, but we assume the caller will not exceed sizeof(e->errmsg) */
 #define SET_ERR(e, code, fmt, ...) do {                                 \
     (e)->last_err = (code);                                             \
@@ -334,7 +354,7 @@ bool elf_is_mapping_sym(const char *name) {
 
 void elf_print_arm_flags(uint32_t flags) {
     printf("  ARM flags: 0x%08x\n", flags);
-    printf("    EABI version: %d\n", arm_eabi_ver(flags));
+    printf("    EABI version: %u\n", arm_eabi_ver(flags));
     if (arm_be8(flags)) printf("    BE-8\n");
     if (arm_hard_float(flags)) printf("    Hard float\n");
     if (arm_soft_float(flags)) printf("    Soft float\n");
@@ -401,6 +421,47 @@ void elf_print_phdrs(elf_t *e) {
                (ph->p_flags & PF_X) ? 'X' : ' ', ph->p_align);
         if (ph->p_type == PT_INTERP && ph->p_filesz > 0)
             printf("      [Interpreter: %s]\n", (const char *)e->base + ph->p_offset);
+    }
+}
+
+/*
+ * A section is in a segment if: sh_addr >= p_vaddr && sh_addr + sh_size <= p_vaddr + p_memsz
+ * Or:  S ∈ P  ⇔  [ S.sh_addr, S.sh_addr + S.sh_size )  ⊆  [ P.p_vaddr, P.p_vaddr + P.p_memsz )
+ * For SHT_NULL or sections with sh_addr == 0, we use file offset comparison.
+ */
+void elf_print_section_to_segment(elf_t *e) {
+    if (!e || !e->phdrs || !e->shdrs || e->ehdr->e_phnum == 0) return;
+
+    printf("\n Section to Segment mapping:\n");
+    printf("  Segment Sections...\n");
+
+    for (uint32_t i = 0; i < e->ehdr->e_phnum; i++) {
+        Elf32_Phdr *ph = &e->phdrs[i];
+        printf("   %02u     ", i);
+
+        for (uint32_t j = 0; j < e->ehdr->e_shnum; j++) {
+            Elf32_Shdr *sh = &e->shdrs[j];
+
+            if (sh->sh_type == SHT_NULL) continue;
+
+            bool in_segment = false;
+
+            if (sh->sh_flags & SHF_ALLOC) {
+                /* Allocated sections: sh_addr */
+                uint32_t sh_end = sh->sh_addr + sh->sh_size;
+                uint32_t ph_end = ph->p_vaddr + ph->p_memsz;
+                in_segment = (sh->sh_addr >= ph->p_vaddr && sh_end <= ph_end);
+            } else if (sh->sh_size > 0 && ph->p_filesz > 0) {
+                /* Non-allocated sections (debug, etc): use sh_offset */
+                uint32_t sh_end = sh->sh_offset + sh->sh_size;
+                uint32_t ph_end = ph->p_offset + ph->p_filesz;
+                in_segment = (sh->sh_offset >= ph->p_offset && sh_end <= ph_end);
+            }
+
+            if (in_segment)
+                printf("%s ", elf_section_name(e, sh));
+        }
+        printf("\n");
     }
 }
 
@@ -529,24 +590,15 @@ static const char *note_type_str(const char *owner, uint32_t type) {
             case NT_AUXV: return "NT_AUXV"; case NT_SIGINFO: return "NT_SIGINFO";
             case NT_FILE: return "NT_FILE";
             /* ARM-specific - Exhaustive, I couldn't find much info on these when I looked so I just included all of them */
-            case NT_ARM_VFP: return "NT_ARM_VFP";
-            case NT_ARM_TLS: return "NT_ARM_TLS";
-            case NT_ARM_HW_BREAK: return "NT_ARM_HW_BREAK";
-            case NT_ARM_HW_WATCH: return "NT_ARM_HW_WATCH";
-            case NT_ARM_SYSTEM_CALL: return "NT_ARM_SYSTEM_CALL";
-            case NT_ARM_SVE: return "NT_ARM_SVE";
-            case NT_ARM_PAC_MASK: return "NT_ARM_PAC_MASK";
-            case NT_ARM_PACA_KEYS: return "NT_ARM_PACA_KEYS";
-            case NT_ARM_PACG_KEYS: return "NT_ARM_PACG_KEYS";
-            case NT_ARM_TAGGED_ADDR_CTRL: return "NT_ARM_TAGGED_ADDR_CTRL";
-            case NT_ARM_PAC_ENABLED_KEYS: return "NT_ARM_PAC_ENABLED_KEYS";
-            case NT_ARM_SSVE: return "NT_ARM_SSVE";
-            case NT_ARM_ZA: return "NT_ARM_ZA";
-            case NT_ARM_ZT: return "NT_ARM_ZT";
-            case NT_ARM_FPMR: return "NT_ARM_FPMR";
-            case NT_ARM_POE: return "NT_ARM_POE";
-            case NT_ARM_GCS: return "NT_ARM_GCS";
-            default: return "NT_<unknown>";
+            case NT_ARM_VFP: return "NT_ARM_VFP"; case NT_ARM_TLS: return "NT_ARM_TLS";
+            case NT_ARM_HW_BREAK: return "NT_ARM_HW_BREAK"; case NT_ARM_HW_WATCH: return "NT_ARM_HW_WATCH";
+            case NT_ARM_SYSTEM_CALL: return "NT_ARM_SYSTEM_CALL"; case NT_ARM_SVE: return "NT_ARM_SVE";
+            case NT_ARM_PAC_MASK: return "NT_ARM_PAC_MASK"; case NT_ARM_PACA_KEYS: return "NT_ARM_PACA_KEYS";
+            case NT_ARM_PACG_KEYS: return "NT_ARM_PACG_KEYS"; case NT_ARM_TAGGED_ADDR_CTRL: return "NT_ARM_TAGGED_ADDR_CTRL";
+            case NT_ARM_PAC_ENABLED_KEYS: return "NT_ARM_PAC_ENABLED_KEYS"; case NT_ARM_SSVE: return "NT_ARM_SSVE";
+            case NT_ARM_ZA: return "NT_ARM_ZA"; case NT_ARM_ZT: return "NT_ARM_ZT";
+            case NT_ARM_FPMR: return "NT_ARM_FPMR"; case NT_ARM_POE: return "NT_ARM_POE";
+            case NT_ARM_GCS: return "NT_ARM_GCS"; default: return "NT_<unknown>";
         }
     }
 
@@ -643,6 +695,7 @@ void elf_dump(elf_t *e) {
     elf_print_ehdr(e);
     elf_print_shdrs(e);
     elf_print_phdrs(e);
+    elf_print_section_to_segment(e);
     elf_print_symtab(e, false);
     elf_print_symtab(e, true);
     elf_print_all_relocs(e);

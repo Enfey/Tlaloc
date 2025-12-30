@@ -104,6 +104,7 @@ void elf_print_shdrs(elf_t *e);
 Elf32_Phdr *elf_get_phdr(elf_t *e, uint32_t idx);
 const char *elf_phtype_str(uint32_t type);
 void elf_print_phdrs(elf_t *e);
+void elf_print_section_to_segment(elf_t *e);
 
 Elf32_Sym *elf_get_sym(elf_t *e, uint32_t idx, bool dynamic);
 const char *elf_sym_name(elf_t *e, Elf32_Sym *sym, bool dynamic);
