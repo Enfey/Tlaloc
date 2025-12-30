@@ -25,6 +25,7 @@
 
 #define _GNU_SOURCE
 #include "lens.h"
+#include "../tlaloc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -186,7 +187,8 @@ const char *elf_phtype_str(uint32_t type) {
         case PT_DYNAMIC: return "DYNAMIC"; case PT_INTERP: return "INTERP";
         case PT_NOTE: return "NOTE"; case PT_PHDR: return "PHDR"; case PT_TLS: return "TLS";
         case PT_GNU_EH_FRAME: return "GNU_EH_FRAME"; case PT_GNU_STACK: return "GNU_STACK";
-        case PT_GNU_RELRO: return "GNU_RELRO"; case PT_ARM_EXIDX: return "ARM_EXIDX";
+        case PT_GNU_RELRO: return "GNU_RELRO"; case PT_GNU_PROPERTY: return "GNU_PROPERTY";
+        case PT_ARM_EXIDX: return "ARM_EXIDX"; case PT_ARM_ARCHEXT: return "ARM_ARCHEXT";
         default: return "UNKNOWN";
     }
 }
@@ -332,7 +334,7 @@ bool elf_is_mapping_sym(const char *name) {
 
 void elf_print_arm_flags(uint32_t flags) {
     printf("  ARM flags: 0x%08x\n", flags);
-    printf("    EABI version: %u\n", arm_eabi_ver(flags));
+    printf("    EABI version: %d\n", arm_eabi_ver(flags));
     if (arm_be8(flags)) printf("    BE-8\n");
     if (arm_hard_float(flags)) printf("    Hard float\n");
     if (arm_soft_float(flags)) printf("    Soft float\n");
@@ -503,6 +505,139 @@ void elf_print_dynamic(elf_t *e) {
     }
 }
 
+#define NOTE_ALIGN(x)   ALIGN_UP((x), 4)
+
+static const char *note_type_str(const char *owner, uint32_t type) {
+    if (!owner) owner = "";
+
+    if (strcmp(owner, "GNU") == 0) {
+        switch (type) {
+            case NT_GNU_ABI_TAG: return "NT_GNU_ABI_TAG";
+            case NT_GNU_HWCAP: return "NT_GNU_HWCAP";
+            case NT_GNU_BUILD_ID: return "NT_GNU_BUILD_ID";
+            case NT_GNU_GOLD_VERSION: return "NT_GNU_GOLD_VERSION";
+            case NT_GNU_PROPERTY_TYPE_0: return "NT_GNU_PROPERTY_TYPE_0";
+            default: return "NT_GNU_<unknown>";
+        }
+    }
+
+    /* Linux/CORE notes (including ARM-specific) */
+    if (strcmp(owner, "LINUX") == 0 || strcmp(owner, "CORE") == 0) {
+        switch (type) {
+            case NT_PRSTATUS: return "NT_PRSTATUS"; case NT_PRFPREG: return "NT_PRFPREG";
+            case NT_PRPSINFO: return "NT_PRPSINFO"; case NT_TASKSTRUCT: return "NT_TASKSTRUCT";
+            case NT_AUXV: return "NT_AUXV"; case NT_SIGINFO: return "NT_SIGINFO";
+            case NT_FILE: return "NT_FILE";
+            /* ARM-specific - Exhaustive, I couldn't find much info on these when I looked so I just included all of them */
+            case NT_ARM_VFP: return "NT_ARM_VFP";
+            case NT_ARM_TLS: return "NT_ARM_TLS";
+            case NT_ARM_HW_BREAK: return "NT_ARM_HW_BREAK";
+            case NT_ARM_HW_WATCH: return "NT_ARM_HW_WATCH";
+            case NT_ARM_SYSTEM_CALL: return "NT_ARM_SYSTEM_CALL";
+            case NT_ARM_SVE: return "NT_ARM_SVE";
+            case NT_ARM_PAC_MASK: return "NT_ARM_PAC_MASK";
+            case NT_ARM_PACA_KEYS: return "NT_ARM_PACA_KEYS";
+            case NT_ARM_PACG_KEYS: return "NT_ARM_PACG_KEYS";
+            case NT_ARM_TAGGED_ADDR_CTRL: return "NT_ARM_TAGGED_ADDR_CTRL";
+            case NT_ARM_PAC_ENABLED_KEYS: return "NT_ARM_PAC_ENABLED_KEYS";
+            case NT_ARM_SSVE: return "NT_ARM_SSVE";
+            case NT_ARM_ZA: return "NT_ARM_ZA";
+            case NT_ARM_ZT: return "NT_ARM_ZT";
+            case NT_ARM_FPMR: return "NT_ARM_FPMR";
+            case NT_ARM_POE: return "NT_ARM_POE";
+            case NT_ARM_GCS: return "NT_ARM_GCS";
+            default: return "NT_<unknown>";
+        }
+    }
+
+    return "NT_<unknown>";
+}
+
+static void print_note(const char *name, uint32_t descsz, uint32_t type,
+                       const void *desc) {
+    printf("  %-16s 0x%08x  %s\n", name, descsz, note_type_str(name, type));
+
+    if (!desc || descsz == 0) return;
+
+    /* Print descriptor content for known GNU types */
+    if (strcmp(name, "GNU") == 0) {
+        switch (type) {
+            case NT_GNU_BUILD_ID: {
+                printf("    Build ID: ");
+                const uint8_t *id = (const uint8_t *)desc;
+                for (uint32_t i = 0; i < descsz; i++) printf("%02x", id[i]);
+                printf("\n");
+                break;
+            }
+            case NT_GNU_ABI_TAG: {
+                if (descsz >= 16) {
+                    const uint32_t *d = (const uint32_t *)desc;
+                    const char *os;
+                    switch (d[0]) {
+                        case 0: os = "Linux"; break; case 1: os = "GNU"; break;
+                        case 2: os = "Solaris2"; break; case 3: os = "FreeBSD"; break;
+                        default: os = "Unknown"; break;
+                    }
+                    printf("    OS: %s, ABI: %u.%u.%u\n", os, d[1], d[2], d[3]);
+                }
+                break;
+            }
+            case NT_GNU_GOLD_VERSION:
+                printf("    Version: %.*s\n", descsz, (const char *)desc);
+                break;
+            case NT_GNU_PROPERTY_TYPE_0: {
+                printf("    Properties:\n");
+                const uint8_t *p = (const uint8_t *)desc;
+                const uint8_t *pend = p + descsz;
+                while (p + 8 <= pend) {
+                    uint32_t pr_type = *(const uint32_t *)p;
+                    uint32_t pr_datasz = *(const uint32_t *)(p + 4);
+                    printf("      type=0x%x, datasz=%u\n", pr_type, pr_datasz);
+                    p += 8 + NOTE_ALIGN(pr_datasz);
+                }
+                break;
+            }
+        }
+    }
+}
+
+void elf_print_notes(elf_t *e) {
+    if (!e || !e->shdrs) return;
+
+    bool found = false;
+    for (uint32_t i = 0; i < e->ehdr->e_shnum; i++) {
+        Elf32_Shdr *sh = &e->shdrs[i];
+        if (sh->sh_type != SHT_NOTE) continue;
+        if (!in_bounds(e, sh->sh_offset, sh->sh_size)) continue;
+
+        if (!found) {
+            printf("\nDisplaying notes found in: %s\n", e->path);
+            printf("  %-16s %-11s Type\n", "Owner", "Data size");
+            found = true;
+        }
+        printf(" Section '%s':\n", elf_section_name(e, sh));
+
+        const uint8_t *ptr = (const uint8_t *)e->base + sh->sh_offset;
+        const uint8_t *end = ptr + sh->sh_size;
+
+        while (ptr + sizeof(Elf32_Nhdr) <= end) {
+            const Elf32_Nhdr *nhdr = (const Elf32_Nhdr *)ptr;
+            ptr += sizeof(Elf32_Nhdr);
+
+            size_t name_aligned = NOTE_ALIGN(nhdr->n_namesz);
+            size_t desc_aligned = NOTE_ALIGN(nhdr->n_descsz);
+            if (ptr + name_aligned + desc_aligned > end) break;
+
+            const char *name = nhdr->n_namesz > 0 ? (const char *)ptr : "";
+            const void *desc = nhdr->n_descsz > 0 ? ptr + name_aligned : NULL;
+
+            print_note(name, nhdr->n_descsz, nhdr->n_type, desc);
+            ptr += name_aligned + desc_aligned;
+        }
+    }
+    if (!found) printf("\nNo notes.\n");
+}
+
 void elf_dump(elf_t *e) {
     if (!e) return;
     elf_print_ehdr(e);
@@ -512,6 +647,7 @@ void elf_dump(elf_t *e) {
     elf_print_symtab(e, true);
     elf_print_all_relocs(e);
     elf_print_dynamic(e);
+    elf_print_notes(e);
 }
 
 static void usage(const char *prog) {

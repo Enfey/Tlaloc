@@ -45,7 +45,7 @@ enum {
 };
 
 static inline uint32_t arm_eabi_ver(uint32_t flags) { return (flags & EF_ARM_EABIMASK) >> 24; }
-static inline bool arm_be8(uint32_t flags){ return (flags & EF_ARM_BE8) != 0; }
+static inline bool arm_be8(uint32_t flags) { return (flags & EF_ARM_BE8) != 0; }
 static inline bool arm_hard_float(uint32_t flags) { return (flags & EF_ARM_ABI_FLOAT_HARD) != 0; }
 static inline bool arm_soft_float(uint32_t flags) { return (flags & EF_ARM_ABI_FLOAT_SOFT) != 0; }
 
@@ -121,7 +121,9 @@ const char *elf_reloc_type_str(uint8_t type);
 void elf_print_dynamic(elf_t *e);
 const char *elf_dyn_tag_str(int32_t tag);
 
-/*analogous to readelf -a*/
+void elf_print_notes(elf_t *e);
+
+/* Analogous to readelf -a */
 void elf_dump(elf_t *e);
 
 #endif /* LENS_H */
