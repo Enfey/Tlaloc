@@ -1,10 +1,11 @@
 #!/bin/bash
-# Build Tlaloc for ARM64 (AArch64)
 set -e
 
 cd /workspace
 
 cmake -B build-arm64 -G Ninja \
+    -DCMAKE_SYSTEM_NAME=Linux \
+    -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
     -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
     -DCMAKE_BUILD_TYPE=Release
 

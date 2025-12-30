@@ -332,7 +332,7 @@ bool elf_is_mapping_sym(const char *name) {
 
 void elf_print_arm_flags(uint32_t flags) {
     printf("  ARM flags: 0x%08x\n", flags);
-    printf("    EABI version: %d\n", arm_eabi_ver(flags));
+    printf("    EABI version: %u\n", arm_eabi_ver(flags));
     if (arm_be8(flags)) printf("    BE-8\n");
     if (arm_hard_float(flags)) printf("    Hard float\n");
     if (arm_soft_float(flags)) printf("    Soft float\n");

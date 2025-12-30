@@ -1,5 +1,21 @@
-TLALOC
+  /###           / ###             ###                        
+ /  ############/   ###             ###                       
+/     #########      ##              ##                       
+#     /  #           ##              ##                       
+ ##  /  ##           ##              ##                       
+    /  ###           ##      /###    ##      /###     /###    
+   ##   ##           ##     / ###  / ##     / ###  / / ###  / 
+   ##   ##           ##    /   ###/  ##    /   ###/ /   ###/  
+   ##   ##           ##   ##    ##   ##   ##    ## ##         
+   ##   ##           ##   ##    ##   ##   ##    ## ##         
+    ##  ##           ##   ##    ##   ##   ##    ## ##         
+     ## #      /     ##   ##    ##   ##   ##    ## ##         
+      ###     /      ##   ##    /#   ##   ##    ## ###     /  
+       ######/       ### / ####/ ##  ### / ######   ######/   
+         ###          ##/   ###   ##  ##/   ####     #####    
+
 ======
+
 ELF interrogation and manipulation utilities for GNU/Linux.
 
 COMPONENTS
@@ -39,8 +55,6 @@ DOCKER
         - GCC cross-compilers for ARM32/ARM64
         - QEMU user-mode emulation
         - clang-format, cppcheck, valgrind, gdb-multiarch
-
-    You should use the docker container if you'd prefer valgrind.
 
 QEMU TESTING
     qemu-arm -L /usr/arm-linux-gnueabi build-arm32/bin/<component> <args>
