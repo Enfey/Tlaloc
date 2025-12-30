@@ -1,15 +1,61 @@
-ELF interrogation and manipulation utilities targeting GNU/linux systems. 
+TLALOC
+======
+ELF interrogation and manipulation utilities for GNU/Linux.
 
-1. [LENS](src/lens/) - "Linker-aware ELF navigation system" capable of interrogating ET_DYN, ET_EXEC, and ET_REL objects via memory-mapping object contents and reading them into the corresponding structs provided in [elf.h](https://github.com/torvalds/linux/blob/master/include/uapi/linux/elf.h).
-2. TBD
-3. TBD
-4. TBD
+COMPONENTS
+    lens      - 'fast' mmap-based ELF parser for ARM32/ARM64
+    soul      - self-erasure userspace loader
+    lance     - TBD
+    suros     - TBD
 
-To build this project:
-1. cmake -B build -G Ninja
-2. ninja -C build
+BUILD
+    One can build themselves, or use .scripts/build-native.sh for native development.
+    cmake -B build -G Ninja
+    ninja -C build
+    ninja -C build lens          (single target)
 
-To build a specific executable
-1. ninja -C build <execname>
+    Binaries @ build/bin/
 
-Executables are output to build/bin.
+DOCKER
+    Build container:
+        docker build -t tlaloc-dev .
+
+    Interactive shell:
+        docker run -it --rm -v $(pwd):/workspace tlaloc-dev
+
+    Inside container:
+        ./scripts/build-native.sh     native + ASan/UBSan, -O0
+        ./scripts/build-arm32.sh      ARMv7-A cross-compile
+        ./scripts/build-arm64.sh      AArch64 cross-compile
+
+    One-liner (no shell):
+        docker run --rm -v $(pwd):/workspace tlaloc-dev ./scripts/build-arm32.sh
+
+    Volume mount (-v) maps your local directory to /workspace inside the
+    container, so builds persist after the container exits. --rm
+    removes the container after it stops.
+
+    The container includes:
+        - GCC cross-compilers for ARM32/ARM64
+        - QEMU user-mode emulation
+        - clang-format, cppcheck, valgrind, gdb-multiarch
+
+    You should use the docker container if you'd prefer valgrind.
+
+QEMU TESTING
+    qemu-arm -L /usr/arm-linux-gnueabi build-arm32/bin/<component> <args>
+    qemu-aarch64 -L /usr/aarch64-linux-gnu build-arm64/bin/<component> <args>
+
+CODE STYLE
+    See .clang-format
+    
+    Format:  find src -name '*.[ch]' | xargs clang-format -i
+    Check:   find src -name '*.[ch]' | xargs clang-format --dry-run --Werror
+
+CI
+    - Native build + ASan/UBSan
+    - ARM32/ARM64 cross-compilation
+    - cppcheck
+    - clang-format check
+
+(c) 2025 Felix Riley-Kay

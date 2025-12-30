@@ -160,9 +160,7 @@ const char *elf_type_str(uint16_t type) {
 
 const char *elf_machine_str(uint16_t machine) {
     switch (machine) {
-        case EM_ARM: return "ARM"; case EM_386: return "Intel 80386";
-        case EM_X86_64: return "AMD x86-64"; case EM_AARCH64: return "AArch64";
-        case EM_RISCV: return "RISC-V"; default: return "Unknown";
+        case EM_ARM: return "ARM"; default: return "Unknown";
     }
 }
 

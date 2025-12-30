@@ -6,9 +6,10 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-add_compile_options(-Wall -Wextra -Wnull-dereference -Wwrite-strings -fsanitize=undefined,address -fno-omit-frame-pointer) # Disable UBsan for production build
+add_compile_options(-Wall -Wextra -Wnull-dereference -Wwrite-strings -fsanitize=undefined,address -fno-omit-frame-pointer)
+add_link_options(-fsanitize=undefined,address)
 
 add_subdirectory(src/lens)
-add_subdirectory(src/parasite)
+add_subdirectory(src/soul)
 add_subdirectory(src/pulse)
 add_subdirectory(src/surosam)
