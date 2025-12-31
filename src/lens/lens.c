@@ -17,13 +17,14 @@
 #                #              #                  |                
  ##               ##             ##                 \)              
                                                      
- * lens.c - mmap-based ELF parser for 32/64-bit ARM binaries
- * Supports ET_REL, ET_EXEC, ET_DYN.
+ * lens.c - implementation of an mmap-based ELF parser for EM_ARM and EM_AARCH64 objects with E_TYPE
+ * ∈ {ET_REL, ET_EXEC, ET_DYN}
  *
  * Copyright (c) 2025 Felix Riley-Kay @ github.com/enfey
  */
 
 #define _GNU_SOURCE
+#include <elf.h>
 #include "lens.h"
 #include "../tlaloc.h"
 #include <stdio.h>
@@ -68,7 +69,7 @@ int elf_open(elf_t *e, const char *path) {
     if (!e) return E_NULLPTR;
     if (!path) { SET_ERR(e, E_NULLPTR, "path is NULL"); return E_NULLPTR; }
 
-    memset(e, 0, sizeof(*e)); 
+    memset(e, 0, sizeof(*e));
     e->path = path;
 
     int fd = open(path, O_RDONLY);
@@ -78,7 +79,7 @@ int elf_open(elf_t *e, const char *path) {
     if (fstat(fd, &st) < 0) { SET_ERR(e, E_MMAP, "fstat: %s", strerror(errno)); close(fd); return E_MMAP; }
     e->size = st.st_size;
 
-    if (e->size < sizeof(Elf32_Ehdr)) {
+    if (e->size < EI_NIDENT) {
         SET_ERR(e, E_TRUNCATED, "file too small"); close(fd); return E_TRUNCATED;
     }
 
@@ -86,82 +87,203 @@ int elf_open(elf_t *e, const char *path) {
     close(fd);
     if (base == MAP_FAILED) { SET_ERR(e, E_MMAP, "mmap: %s", strerror(errno)); return E_MMAP; }
     e->base = base;
-    e->ehdr = (Elf32_Ehdr *)base; /*Take first bytes as ELF header*/
 
-    /*Endianness agnostic, everything is 1 byte each in e_ident[EI_NIDENT] - should be noted that ARMv7-A is biendian*/
-    if (memcmp(e->ehdr->e_ident, ELFMAG, SELFMAG) != 0) {
+    const unsigned char *ident = (const unsigned char *)base;
+    /* Magic number comparison */
+    if (memcmp(ident, ELFMAG, SELFMAG) != 0) {
         munmap(e->base, e->size); e->base = NULL;
         SET_ERR(e, E_NOT_ELF, "not an ELF file"); return E_NOT_ELF;
     }
-    if (e->ehdr->e_ident[EI_CLASS] != ELFCLASS32) {
-        munmap(e->base, e->size); e->base = NULL;
-        SET_ERR(e, E_NOT_32BIT, "not 32-bit ELF"); return E_NOT_32BIT;
-    }
-    if (e->ehdr->e_machine != EM_ARM) {
-        munmap(e->base, e->size); e->base = NULL;
-        SET_ERR(e, E_NOT_ARM, "not ARM (machine=0x%x)", e->ehdr->e_machine); return E_NOT_ARM;
-    }
-    uint16_t type = e->ehdr->e_type;
-    if (type != ET_REL && type != ET_EXEC && type != ET_DYN) {
-        munmap(e->base, e->size); e->base = NULL;
-        SET_ERR(e, E_BAD_TYPE, "unsupported ELF type %d", type); return E_BAD_TYPE;
-    }
 
-    if (e->ehdr->e_shnum > 0 && e->ehdr->e_shoff > 0) {
-        size_t shdrs_size = e->ehdr->e_shnum * sizeof(Elf32_Shdr);
-        if (!in_bounds(e, e->ehdr->e_shoff, shdrs_size)) {
+    e->elf_class = ident[EI_CLASS];
+
+    if (ELF_IS_32(e)) {
+        if (e->size < sizeof(Elf32_Ehdr)){
             munmap(e->base, e->size); e->base = NULL;
-            SET_ERR(e, E_TRUNCATED, "section headers past EOF"); return E_TRUNCATED;
+            SET_ERR(e, E_TRUNCATED, "truncated ELF32 header"); return E_TRUNCATED;
         }
-        e->shdrs = (Elf32_Shdr *)((char *)base + e->ehdr->e_shoff);
+        Elf32_Ehdr *ehdr = (Elf32_Ehdr *)base;
+        e->e32.ehdr = ehdr;
+        e->elf_type = ehdr->e_type;
+        e->elf_machine = ehdr->e_machine;
+        e->shnum = ehdr->e_shnum;
+        e->phnum = ehdr->e_phnum;
 
-        if (e->ehdr->e_shstrndx < e->ehdr->e_shnum) {
-            Elf32_Shdr *shstr = &e->shdrs[e->ehdr->e_shstrndx];
-            if (in_bounds(e, shstr->sh_offset, shstr->sh_size))
-                e->shstrtab = (const char *)base + shstr->sh_offset;
-        }
-    }
-
-    if (e->ehdr->e_phnum > 0 && e->ehdr->e_phoff > 0) {
-        size_t phdrs_size = e->ehdr->e_phnum * sizeof(Elf32_Phdr);
-        if (!in_bounds(e, e->ehdr->e_phoff, phdrs_size)) {
+        if (ehdr->e_machine != EM_ARM) {
             munmap(e->base, e->size); e->base = NULL;
-            SET_ERR(e, E_TRUNCATED, "program headers past EOF"); return E_TRUNCATED;
+            SET_ERR(e, E_NOT_ARM, "not ARM (machine=0x%x)", e->elf_machine); return E_NOT_ARM;
         }
-        e->phdrs = (Elf32_Phdr *)((char *)base + e->ehdr->e_phoff);
-    }
+        if (ehdr->e_type != ET_REL && ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) {
+            munmap(e->base, e->size); e->base = NULL;
+            SET_ERR(e, E_BAD_TYPE, "unsupported ELF type %d", e->elf_type); return E_BAD_TYPE;
+        }
 
-    if (e->shdrs) {
-        for (uint32_t i = 0; i < e->ehdr->e_shnum; i++) {
-            Elf32_Shdr *sh = &e->shdrs[i];
-            if (sh->sh_type == SHT_SYMTAB && !e->symtab) {
-                if (in_bounds(e, sh->sh_offset, sh->sh_size)) {
-                    e->symtab = (Elf32_Sym *)((char *)base + sh->sh_offset);
-                    e->symtab_count = sh->sh_size / sizeof(Elf32_Sym);
-                    if (sh->sh_link < e->ehdr->e_shnum) {
-                        Elf32_Shdr *strtab = &e->shdrs[sh->sh_link];
-                        if (in_bounds(e, strtab->sh_offset, strtab->sh_size))
-                            e->strtab = (const char *)base + strtab->sh_offset;
-                    }
-                }
-            } else if (sh->sh_type == SHT_DYNSYM && !e->dynsym) {
-                if (in_bounds(e, sh->sh_offset, sh->sh_size)) {
-                    e->dynsym = (Elf32_Sym *)((char *)base + sh->sh_offset);
-                    e->dynsym_count = sh->sh_size / sizeof(Elf32_Sym);
-                    if (sh->sh_link < e->ehdr->e_shnum) {
-                        Elf32_Shdr *dynstr = &e->shdrs[sh->sh_link];
-                        if (in_bounds(e, dynstr->sh_offset, dynstr->sh_size))
-                            e->dynstr = (const char *)base + dynstr->sh_offset;
-                    }
-                }
-            } else if (sh->sh_type == SHT_DYNAMIC && !e->dynamic) {
-                if (in_bounds(e, sh->sh_offset, sh->sh_size)) {
-                    e->dynamic = (Elf32_Dyn *)((char *)base + sh->sh_offset);
-                    e->dynamic_count = sh->sh_size / sizeof(Elf32_Dyn);
+        if (ehdr->e_shnum > 0 && ehdr->e_shoff > 0) {
+            size_t shdrs_size;
+            if (__builtin_mul_overflow(ehdr->e_shnum, sizeof(Elf32_Shdr), &shdrs_size)) {
+                munmap(e->base, e->size); e->base = NULL;
+                SET_ERR(e, E_TRUNCATED, "section header count overflow"); return E_TRUNCATED;
+            }
+            if (!in_bounds(e, ehdr->e_shoff, shdrs_size)) {
+                munmap(e->base, e->size); e->base = NULL;
+                SET_ERR(e, E_TRUNCATED, "section headers past EOF"); return E_TRUNCATED;
+            }
+
+            e->e32.shdrs = (Elf32_Shdr *)((char *)base + ehdr->e_shoff);
+
+            if (ehdr->e_shstrndx < ehdr->e_shnum) {
+                Elf32_Shdr *shstr = &e->e32.shdrs[ehdr->e_shstrndx];
+                if (in_bounds(e, shstr->sh_offset, shstr->sh_size)) {
+                    e->shstrtab = (const char *)base + shstr->sh_offset;
+                    e->shstrtab_size = shstr->sh_size;
                 }
             }
         }
+
+        if (ehdr->e_phnum > 0 && ehdr->e_phoff > 0) {
+            size_t phdrs_size;
+            if (__builtin_mul_overflow(ehdr->e_phnum, sizeof(Elf32_Phdr), &phdrs_size)) {
+                munmap(e->base, e->size); e->base = NULL;
+                SET_ERR(e, E_TRUNCATED, "program header count overflow"); return E_TRUNCATED;
+            }
+            if (!in_bounds(e, ehdr->e_phoff, phdrs_size)) {
+                munmap(e->base, e->size); e->base = NULL;
+                SET_ERR(e, E_TRUNCATED, "program headers past EOF"); return E_TRUNCATED;
+            }
+            e->e32.phdrs = (Elf32_Phdr *)((char *)base + ehdr->e_phoff);
+        }
+
+        if (e->e32.shdrs) {
+            for (uint32_t i = 0; i < ehdr->e_shnum; i++) {
+                Elf32_Shdr *sh = &e->e32.shdrs[i];
+                if (sh->sh_type == SHT_SYMTAB && !e->e32.symtab) {
+                    if (in_bounds(e, sh->sh_offset, sh->sh_size)) {
+                        e->e32.symtab = (Elf32_Sym *)((char *)base + sh->sh_offset);
+                        e->symtab_count = sh->sh_size / sizeof(Elf32_Sym);
+                        if (sh->sh_link < ehdr->e_shnum) {
+                            Elf32_Shdr *strtab = &e->e32.shdrs[sh->sh_link];
+                            if (in_bounds(e, strtab->sh_offset, strtab->sh_size)) {
+                                e->strtab = (const char *)base + strtab->sh_offset;
+                                e->strtab_size = strtab->sh_size;
+                            }
+                        }
+                    }
+                } else if (sh->sh_type == SHT_DYNSYM && !e->e32.dynsym) {
+                    if (in_bounds(e, sh->sh_offset, sh->sh_size)) {
+                        e->e32.dynsym = (Elf32_Sym *)((char *)base + sh->sh_offset);
+                        e->dynsym_count = sh->sh_size / sizeof(Elf32_Sym);
+                        if (sh->sh_link < ehdr->e_shnum) {
+                            Elf32_Shdr *dynstr = &e->e32.shdrs[sh->sh_link];
+                            if (in_bounds(e, dynstr->sh_offset, dynstr->sh_size)) {
+                                e->dynstr = (const char *)base + dynstr->sh_offset;
+                                e->dynstr_size = dynstr->sh_size;
+                            }
+                        }
+                    }
+                } else if (sh->sh_type == SHT_DYNAMIC && !e->e32.dynamic) {
+                    if (in_bounds(e, sh->sh_offset, sh->sh_size)) {
+                        e->e32.dynamic = (Elf32_Dyn *)((char *)base + sh->sh_offset);
+                        e->dynamic_count = sh->sh_size / sizeof(Elf32_Dyn);
+                    }
+                }
+            }
+        }
+    } else if (ELF_IS_64(e)) {
+        if (e->size < sizeof(Elf64_Ehdr)) {
+            munmap(e->base, e->size); e->base = NULL;
+            SET_ERR(e, E_TRUNCATED, "truncated ELF64 header"); return E_TRUNCATED;
+        }
+        Elf64_Ehdr *ehdr = (Elf64_Ehdr *)base;
+        e->e64.ehdr = ehdr;
+        e->elf_type = ehdr->e_type;
+        e->elf_machine = ehdr->e_machine;
+        e->shnum = ehdr->e_shnum;
+        e->phnum = ehdr->e_phnum;
+
+        if (ehdr->e_machine != EM_AARCH64) {
+            munmap(e->base, e->size); e->base = NULL;
+            SET_ERR(e, E_NOT_ARM, "not AArch64 (machine=0x%x)", e->elf_machine); return E_NOT_ARM;
+        }
+        if (ehdr->e_type != ET_REL && ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) {
+            munmap(e->base, e->size); e->base = NULL;
+            SET_ERR(e, E_BAD_TYPE, "unsupported ELF type %d", e->elf_type); return E_BAD_TYPE;
+        }
+
+        /* Section headers */
+        if (ehdr->e_shnum > 0 && ehdr->e_shoff > 0) {
+            size_t shdrs_size;
+            if (__builtin_mul_overflow(ehdr->e_shnum, sizeof(Elf64_Shdr), &shdrs_size)) {
+                munmap(e->base, e->size); e->base = NULL;
+                SET_ERR(e, E_TRUNCATED, "section header count overflow"); return E_TRUNCATED;
+            }
+            if (!in_bounds(e, ehdr->e_shoff, shdrs_size)) {
+                munmap(e->base, e->size); e->base = NULL;
+                SET_ERR(e, E_TRUNCATED, "section headers past EOF"); return E_TRUNCATED;
+            }
+            e->e64.shdrs = (Elf64_Shdr *)((char *)base + ehdr->e_shoff);
+
+            if (ehdr->e_shstrndx < ehdr->e_shnum) {
+                Elf64_Shdr *shstr = &e->e64.shdrs[ehdr->e_shstrndx];
+                if (in_bounds(e, shstr->sh_offset, shstr->sh_size)) {
+                    e->shstrtab = (const char *)base + shstr->sh_offset;
+                    e->shstrtab_size = shstr->sh_size;
+                }
+            }
+        }
+
+        if (ehdr->e_phnum > 0 && ehdr->e_phoff > 0) {
+            size_t phdrs_size;
+            if (__builtin_mul_overflow(ehdr->e_phnum, sizeof(Elf64_Phdr), &phdrs_size)) {
+                munmap(e->base, e->size); e->base = NULL;
+                SET_ERR(e, E_TRUNCATED, "program header count overflow"); return E_TRUNCATED;
+            }
+            if (!in_bounds(e, ehdr->e_phoff, phdrs_size)) {
+                munmap(e->base, e->size); e->base = NULL;
+                SET_ERR(e, E_TRUNCATED, "program headers past EOF"); return E_TRUNCATED;
+            }
+            e->e64.phdrs = (Elf64_Phdr *)((char *)base + ehdr->e_phoff);
+        }
+
+        if (e->e64.shdrs) {
+            for (uint32_t i = 0; i < ehdr->e_shnum; i++) {
+                Elf64_Shdr *sh = &e->e64.shdrs[i];
+                if (sh->sh_type == SHT_SYMTAB && !e->e64.symtab) {
+                    if (in_bounds(e, sh->sh_offset, sh->sh_size)) {
+                        e->e64.symtab = (Elf64_Sym *)((char *)base + sh->sh_offset);
+                        e->symtab_count = sh->sh_size / sizeof(Elf64_Sym);
+                        if (sh->sh_link < ehdr->e_shnum) {
+                            Elf64_Shdr *strtab = &e->e64.shdrs[sh->sh_link];
+                            if (in_bounds(e, strtab->sh_offset, strtab->sh_size)) {
+                                e->strtab = (const char *)base + strtab->sh_offset;
+                                e->strtab_size = strtab->sh_size;
+                            }
+                        }
+                    }
+                } else if (sh->sh_type == SHT_DYNSYM && !e->e64.dynsym) {
+                    if (in_bounds(e, sh->sh_offset, sh->sh_size)) {
+                        e->e64.dynsym = (Elf64_Sym *)((char *)base + sh->sh_offset);
+                        e->dynsym_count = sh->sh_size / sizeof(Elf64_Sym);
+                        if (sh->sh_link < ehdr->e_shnum) {
+                            Elf64_Shdr *dynstr = &e->e64.shdrs[sh->sh_link];
+                            if (in_bounds(e, dynstr->sh_offset, dynstr->sh_size)) {
+                                e->dynstr = (const char *)base + dynstr->sh_offset;
+                                e->dynstr_size = dynstr->sh_size;
+                            }
+                        }
+                    }
+                } else if (sh->sh_type == SHT_DYNAMIC && !e->e64.dynamic) {
+                    if (in_bounds(e, sh->sh_offset, sh->sh_size)) {
+                        e->e64.dynamic = (Elf64_Dyn *)((char *)base + sh->sh_offset);
+                        e->dynamic_count = sh->sh_size / sizeof(Elf64_Dyn);
+                    }
+                }
+            }
+        }
+    } else {
+        munmap(e->base, e->size); e->base = NULL;
+        SET_ERR(e, E_BAD_CLASS, "unsupported ELF class %d", e->elf_class); return E_BAD_CLASS;
     }
+
     return E_OK;
 }
 
@@ -169,6 +291,271 @@ void elf_close(elf_t *e) {
     if (!e) return;
     if (e->base && e->base != MAP_FAILED) munmap(e->base, e->size);
     memset(e, 0, sizeof(*e));
+}
+
+/*
+ * Index-based accessors - all return widest type (uint64_t) to unify the API.
+ * These are marked hot because they're all called frequently during linking. 
+ * 
+ * The branch predictor will learn elf_class very quickly, as it remains the
+ * same for a given elf_t.
+ */
+__attribute__((hot))
+uint64_t elf_sh_addr(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum) return 0;
+    return ELF_IS_64(e) ? e->e64.shdrs[i].sh_addr : e->e32.shdrs[i].sh_addr;
+}
+
+__attribute__((hot))
+uint64_t elf_sh_size(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum) return 0;
+    return ELF_IS_64(e) ? e->e64.shdrs[i].sh_size : e->e32.shdrs[i].sh_size;
+}
+
+__attribute__((hot))
+uint64_t elf_sh_offset(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum) return 0;
+    return ELF_IS_64(e) ? e->e64.shdrs[i].sh_offset : e->e32.shdrs[i].sh_offset;
+}
+
+uint32_t elf_sh_type(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum) return SHT_NULL;
+    return ELF_IS_64(e) ? e->e64.shdrs[i].sh_type : e->e32.shdrs[i].sh_type;
+}
+
+uint64_t elf_sh_flags(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum) return 0;
+    return ELF_IS_64(e) ? e->e64.shdrs[i].sh_flags : e->e32.shdrs[i].sh_flags;
+}
+
+uint32_t elf_sh_link(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum) return 0;
+    return ELF_IS_64(e) ? e->e64.shdrs[i].sh_link : e->e32.shdrs[i].sh_link;
+}
+
+uint32_t elf_sh_info(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum) return 0;
+    return ELF_IS_64(e) ? e->e64.shdrs[i].sh_info : e->e32.shdrs[i].sh_info;
+}
+
+uint64_t elf_sh_addralign(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum) return 0;
+    return ELF_IS_64(e) ? e->e64.shdrs[i].sh_addralign : e->e32.shdrs[i].sh_addralign;
+}
+
+uint64_t elf_sh_entsize(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum) return 0;
+    return ELF_IS_64(e) ? e->e64.shdrs[i].sh_entsize : e->e32.shdrs[i].sh_entsize;
+}
+
+/*
+ * Safe string accessor - checks offset is within table bounds.
+ * Returns empty string for invalid offsets, "<corrupt>" for non-terminated strings.
+ */
+static const char *safe_string(const char *strtab, size_t strtab_size, uint32_t offset) {
+    if (!strtab || offset >= strtab_size) return "";
+    /* Check string terminates within the table */
+    size_t max_len = strtab_size - offset;
+    if (strnlen(strtab + offset, max_len) == max_len) return "<corrupt>";
+    return strtab + offset;
+}
+
+const char *elf_sh_name(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum || !e->shstrtab) return "";
+    uint32_t name_off = ELF_IS_64(e) ? e->e64.shdrs[i].sh_name : e->e32.shdrs[i].sh_name;
+    return safe_string(e->shstrtab, e->shstrtab_size, name_off);
+}
+
+void *elf_sh_data(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->shnum) return NULL;
+    uint32_t type = elf_sh_type(e, i);
+    if (type == SHT_NOBITS) return NULL;
+    uint64_t off = elf_sh_offset(e, i);
+    uint64_t sz = elf_sh_size(e, i);
+    if (!in_bounds(e, off, sz)) return NULL;
+    return (char *)e->base + off;
+}
+
+ssize_t elf_sh_find(const elf_t *e, const char *name) {
+    if (!e || !name || !e->shstrtab) return -1;
+    for (uint32_t i = 0; i < e->shnum; i++) {
+        if (strcmp(elf_sh_name(e, i), name) == 0) return (ssize_t)i;
+    }
+    return -1;
+}
+
+ssize_t elf_sh_find_type(const elf_t *e, uint32_t type) {
+    if (!e) return -1;
+    for (uint32_t i = 0; i < e->shnum; i++) {
+        if (elf_sh_type(e, i) == type) return (ssize_t)i;
+    }
+    return -1;
+}
+
+uint32_t elf_ph_type(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->phnum) return PT_NULL;
+    return ELF_IS_64(e) ? e->e64.phdrs[i].p_type : e->e32.phdrs[i].p_type;
+}
+
+uint32_t elf_ph_flags(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->phnum) return 0;
+    return ELF_IS_64(e) ? e->e64.phdrs[i].p_flags : e->e32.phdrs[i].p_flags;
+}
+
+__attribute__((hot))
+uint64_t elf_ph_offset(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->phnum) return 0;
+    return ELF_IS_64(e) ? e->e64.phdrs[i].p_offset : e->e32.phdrs[i].p_offset;
+}
+
+__attribute__((hot))
+uint64_t elf_ph_vaddr(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->phnum) return 0;
+    return ELF_IS_64(e) ? e->e64.phdrs[i].p_vaddr : e->e32.phdrs[i].p_vaddr;
+}
+
+uint64_t elf_ph_paddr(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->phnum) return 0;
+    return ELF_IS_64(e) ? e->e64.phdrs[i].p_paddr : e->e32.phdrs[i].p_paddr;
+}
+
+__attribute__((hot))
+uint64_t elf_ph_filesz(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->phnum) return 0;
+    return ELF_IS_64(e) ? e->e64.phdrs[i].p_filesz : e->e32.phdrs[i].p_filesz;
+}
+
+__attribute__((hot))
+uint64_t elf_ph_memsz(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->phnum) return 0;
+    return ELF_IS_64(e) ? e->e64.phdrs[i].p_memsz : e->e32.phdrs[i].p_memsz;
+}
+
+uint64_t elf_ph_align(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->phnum) return 0;
+    return ELF_IS_64(e) ? e->e64.phdrs[i].p_align : e->e32.phdrs[i].p_align;
+}
+
+__attribute__((hot))
+uint64_t elf_sym_value(const elf_t *e, uint32_t i, bool dyn) {
+    if (!e) return 0;
+    uint32_t count = dyn ? e->dynsym_count : e->symtab_count;
+    if (i >= count) return 0;
+    if (ELF_IS_64(e)) {
+        Elf64_Sym *tab = dyn ? e->e64.dynsym : e->e64.symtab;
+        return tab ? tab[i].st_value : 0;
+    } else {
+        Elf32_Sym *tab = dyn ? e->e32.dynsym : e->e32.symtab;
+        return tab ? tab[i].st_value : 0;
+    }
+}
+
+uint64_t elf_sym_size(const elf_t *e, uint32_t i, bool dyn) {
+    if (!e) return 0;
+    uint32_t count = dyn ? e->dynsym_count : e->symtab_count;
+    if (i >= count) return 0;
+    if (ELF_IS_64(e)) {
+        Elf64_Sym *tab = dyn ? e->e64.dynsym : e->e64.symtab;
+        return tab ? tab[i].st_size : 0;
+    } else {
+        Elf32_Sym *tab = dyn ? e->e32.dynsym : e->e32.symtab;
+        return tab ? tab[i].st_size : 0;
+    }
+}
+
+uint8_t elf_sym_info(const elf_t *e, uint32_t i, bool dyn) {
+    if (!e) return 0;
+    uint32_t count = dyn ? e->dynsym_count : e->symtab_count;
+    if (i >= count) return 0;
+    if (ELF_IS_64(e)) {
+        Elf64_Sym *tab = dyn ? e->e64.dynsym : e->e64.symtab;
+        return tab ? tab[i].st_info : 0;
+    } else {
+        Elf32_Sym *tab = dyn ? e->e32.dynsym : e->e32.symtab;
+        return tab ? tab[i].st_info : 0;
+    }
+}
+
+uint8_t elf_sym_other(const elf_t *e, uint32_t i, bool dyn) {
+    if (!e) return 0;
+    uint32_t count = dyn ? e->dynsym_count : e->symtab_count;
+    if (i >= count) return 0;
+    if (ELF_IS_64(e)) {
+        Elf64_Sym *tab = dyn ? e->e64.dynsym : e->e64.symtab;
+        return tab ? tab[i].st_other : 0;
+    } else {
+        Elf32_Sym *tab = dyn ? e->e32.dynsym : e->e32.symtab;
+        return tab ? tab[i].st_other : 0;
+    }
+}
+
+__attribute__((hot))
+uint16_t elf_sym_shndx(const elf_t *e, uint32_t i, bool dyn) {
+    if (!e) return SHN_UNDEF;
+    uint32_t count = dyn ? e->dynsym_count : e->symtab_count;
+    if (i >= count) return SHN_UNDEF;
+    if (ELF_IS_64(e)) {
+        Elf64_Sym *tab = dyn ? e->e64.dynsym : e->e64.symtab;
+        return tab ? tab[i].st_shndx : SHN_UNDEF;
+    } else {
+        Elf32_Sym *tab = dyn ? e->e32.dynsym : e->e32.symtab;
+        return tab ? tab[i].st_shndx : SHN_UNDEF;
+    }
+}
+
+const char *elf_sym_name(const elf_t *e, uint32_t i, bool dyn) {
+    if (!e) return "";
+    uint32_t count = dyn ? e->dynsym_count : e->symtab_count;
+    if (i >= count) return "";
+    const char *strtab = dyn ? e->dynstr : e->strtab;
+    size_t strtab_size = dyn ? e->dynstr_size : e->strtab_size;
+    if (!strtab) return "";
+    uint32_t name_off;
+    if (ELF_IS_64(e)) {
+        Elf64_Sym *tab = dyn ? e->e64.dynsym : e->e64.symtab;
+        if (!tab) return "";
+        name_off = tab[i].st_name;
+    } else {
+        Elf32_Sym *tab = dyn ? e->e32.dynsym : e->e32.symtab;
+        if (!tab) return "";
+        name_off = tab[i].st_name;
+    }
+    return safe_string(strtab, strtab_size, name_off);
+}
+
+ssize_t elf_sym_find(const elf_t *e, const char *name, bool dyn) {
+    if (!e || !name) return -1;
+    uint32_t count = dyn ? e->dynsym_count : e->symtab_count;
+    for (uint32_t i = 0; i < count; i++) {
+        if (strcmp(elf_sym_name(e, i, dyn), name) == 0) return (ssize_t)i;
+    }
+    return -1;
+}
+
+bool elf_is_mapping_sym(const char *name) {
+    if (!name || name[0] != '$') return false;
+    /* ARM/AArch64 mapping symbols: $a, $t, $d, $x (and variants like $a.0) */
+    if (name[1] == 'a' || name[1] == 't' || name[1] == 'd' || name[1] == 'x')
+        return (name[2] == '\0' || name[2] == '.');
+    return false;
+}
+
+int64_t elf_dyn_tag(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->dynamic_count) return DT_NULL;
+    if (ELF_IS_64(e)) {
+        return e->e64.dynamic ? e->e64.dynamic[i].d_tag : DT_NULL;
+    } else {
+        return e->e32.dynamic ? e->e32.dynamic[i].d_tag : DT_NULL;
+    }
+}
+
+uint64_t elf_dyn_val(const elf_t *e, uint32_t i) {
+    if (!e || i >= e->dynamic_count) return 0;
+    if (ELF_IS_64(e)) {
+        return e->e64.dynamic ? e->e64.dynamic[i].d_un.d_val : 0;
+    } else {
+        return e->e32.dynamic ? e->e32.dynamic[i].d_un.d_val : 0;
+    }
 }
 
 const char *elf_type_str(uint16_t type) {
@@ -181,11 +568,17 @@ const char *elf_type_str(uint16_t type) {
 
 const char *elf_machine_str(uint16_t machine) {
     switch (machine) {
-        case EM_ARM: return "ARM"; default: return "Unknown";
+        case EM_ARM: return "ARM";
+        case EM_AARCH64: return "AArch64";
+        default: return "Unknown";
     }
 }
 
-const char *elf_shtype_str(uint32_t type) {
+const char *elf_shtype_str(uint32_t type, uint16_t machine) {
+    /* Has duplicate with ARM32 */
+    if(machine == EM_AARCH64)
+        if (type == SHT_AARCH64_ATTRIBUTES) return "AARCH64_ATTRIBUTES";
+    
     switch (type) {
         case SHT_NULL: return "NULL"; case SHT_PROGBITS: return "PROGBITS";
         case SHT_SYMTAB: return "SYMTAB"; case SHT_STRTAB: return "STRTAB";
@@ -201,7 +594,11 @@ const char *elf_shtype_str(uint32_t type) {
     }
 }
 
-const char *elf_phtype_str(uint32_t type) {
+const char *elf_phtype_str(uint32_t type, uint16_t machine) {
+    /* Has duplicate with ARM32 */
+    if (machine == EM_AARCH64) 
+        if (type == PT_AARCH64_UNWIND) return "AARCH64_UNWIND"; 
+    
     switch (type) {
         case PT_NULL: return "NULL"; case PT_LOAD: return "LOAD";
         case PT_DYNAMIC: return "DYNAMIC"; case PT_INTERP: return "INTERP";
@@ -231,26 +628,39 @@ const char *elf_sym_type_str(uint8_t info) {
     }
 }
 
-static const char *sym_vis_str(uint8_t other) {
-    switch (ELF32_ST_VISIBILITY(other)) {
+const char *elf_sym_vis_str(uint8_t other) {
+    switch (ELF32_ST_VISIBILITY(other)) { /* Same macro works for 64-bit */
         case STV_DEFAULT: return "DEFAULT"; case STV_INTERNAL: return "INTERNAL";
         case STV_HIDDEN: return "HIDDEN"; case STV_PROTECTED: return "PROTECTED";
         default: return "UNKNOWN";
     }
 }
 
-const char *elf_reloc_type_str(uint8_t type) {
+const char *elf_reloc_type_str(uint16_t machine, uint32_t type) {
+    if (machine == EM_AARCH64) {
+        switch (type) {
+            case R_AARCH64_NONE: return "R_AARCH64_NONE";case R_AARCH64_ABS64: return "R_AARCH64_ABS64";
+            case R_AARCH64_ABS32: return "R_AARCH64_ABS32";case R_AARCH64_COPY: return "R_AARCH64_COPY";
+            case R_AARCH64_GLOB_DAT: return "R_AARCH64_GLOB_DAT"; case R_AARCH64_JUMP_SLOT: return "R_AARCH64_JUMP_SLOT";
+            case R_AARCH64_RELATIVE: return "R_AARCH64_RELATIVE"; case R_AARCH64_TLS_DTPMOD: return "R_AARCH64_TLS_DTPMOD";
+            case R_AARCH64_TLS_DTPREL: return "R_AARCH64_TLS_DTPREL"; case R_AARCH64_TLS_TPREL: return "R_AARCH64_TLS_TPREL";
+            case R_AARCH64_TLSDESC: return "R_AARCH64_TLSDESC"; case R_AARCH64_CALL26: return "R_AARCH64_CALL26";
+            case R_AARCH64_JUMP26: return "R_AARCH64_JUMP26"; case R_AARCH64_ADR_PREL_PG_HI21: return "R_AARCH64_ADR_PREL_PG_HI21";
+            case R_AARCH64_ADD_ABS_LO12_NC: return "R_AARCH64_ADD_ABS_LO12_NC"; default: return "R_AARCH64_UNKNOWN";
+        }
+    }
     switch (type) {
         case R_ARM_NONE: return "R_ARM_NONE"; case R_ARM_ABS32: return "R_ARM_ABS32";
         case R_ARM_REL32: return "R_ARM_REL32"; case R_ARM_CALL: return "R_ARM_CALL";
-        case R_ARM_JUMP24: return "R_ARM_JUMP24"; case R_ARM_GLOB_DAT: return "R_ARM_GLOB_DAT";
-        case R_ARM_JUMP_SLOT: return "R_ARM_JUMP_SLOT"; case R_ARM_RELATIVE: return "R_ARM_RELATIVE";
-        case R_ARM_COPY: return "R_ARM_COPY"; case R_ARM_TLS_DTPMOD32: return "R_ARM_TLS_DTPMOD32";
-        case R_ARM_TLS_TPOFF32: return "R_ARM_TLS_TPOFF32"; default: return "R_ARM_UNKNOWN";
+        case R_ARM_GLOB_DAT: return "R_ARM_GLOB_DAT"; case R_ARM_JUMP_SLOT: return "R_ARM_JUMP_SLOT"; 
+        case R_ARM_RELATIVE: return "R_ARM_RELATIVE"; case R_ARM_COPY: return "R_ARM_COPY"; 
+        case R_ARM_TLS_DTPMOD32: return "R_ARM_TLS_DTPMOD32"; case R_ARM_TLS_TPOFF32: 
+        case R_ARM_JUMP24: return "R_ARM_JUMP24"; case R_ARM_ABS12: return "R_ARM_ABS12";
+        case R_ARM_PREL31: return "R_ARM_PREREL31"; default: return "R_ARM_UNKNOWN";
     }
 }
 
-const char *elf_dyn_tag_str(int32_t tag) {
+const char *elf_dyn_tag_str(int64_t tag) {
     switch (tag) {
         case DT_NULL: return "NULL"; case DT_NEEDED: return "NEEDED";
         case DT_PLTRELSZ: return "PLTRELSZ"; case DT_PLTGOT: return "PLTGOT";
@@ -275,84 +685,23 @@ const char *elf_dyn_tag_str(int32_t tag) {
         case DT_RELCOUNT: return "RELCOUNT"; case DT_FLAGS_1: return "FLAGS_1";
         case DT_AUXILIARY: return "AUXILIARY"; case DT_FILTER: return "FILTER";
         case DT_POSFLAG_1: return "POSFLAG_1"; case DT_ARM_SYMTABSZ: return "ARM_SYMTABSZ";
-        default: return "UNKNOWN";
+        case DT_AARCH64_VARIANT_PCS: return "DT_AARCH64_VARIANT_PCS"; default: return "UNKNOWN";
     }
 }
 
-Elf32_Shdr *elf_get_shdr(elf_t *e, uint32_t idx) {
-    if (!e || !e->shdrs || idx >= e->ehdr->e_shnum) return NULL;
-    return &e->shdrs[idx];
-}
+#define ADDR_WIDTH(e)   ELF_IS_64(e) ? 16 : 8
 
-const char *elf_section_name(elf_t *e, Elf32_Shdr *sh) {
-    if (!e || !sh || !e->shstrtab) return "";
-    return e->shstrtab + sh->sh_name;
-}
+#define FMT_NAME_W      17
+#define FMT_TYPE_W      15      
+#define FMT_OFFSET_W    6      
+#define FMT_SIZE_W      6    
+#define FMT_ENTSIZE_W   2       
+#define FMT_SHNDX_W     2       
+#define FMT_SYMSIZE_W   5      
+#define FMT_RELTYPE_W   20     
+#define FMT_DYNTAG_W    28      
 
-void *elf_section_data(elf_t *e, Elf32_Shdr *sh) {
-    if (!e || !sh || sh->sh_type == SHT_NOBITS) return NULL;
-    if (!in_bounds(e, sh->sh_offset, sh->sh_size)) return NULL;
-    return (char *)e->base + sh->sh_offset;
-}
-
-Elf32_Shdr *elf_find_section(elf_t *e, const char *name) {
-    if (!e || !name || !e->shdrs || !e->shstrtab) return NULL;
-    for (uint32_t i = 0; i < e->ehdr->e_shnum; i++) {
-        if (strcmp(elf_section_name(e, &e->shdrs[i]), name) == 0)
-            return &e->shdrs[i];
-    }
-    return NULL;
-}
-
-Elf32_Shdr *elf_find_section_by_type(elf_t *e, uint32_t type) {
-    if (!e || !e->shdrs) return NULL;
-    for (uint32_t i = 0; i < e->ehdr->e_shnum; i++) {
-        if (e->shdrs[i].sh_type == type) return &e->shdrs[i];
-    }
-    return NULL;
-}
-
-Elf32_Phdr *elf_get_phdr(elf_t *e, uint32_t idx) {
-    if (!e || !e->phdrs || idx >= e->ehdr->e_phnum) return NULL;
-    return &e->phdrs[idx];
-}
-
-Elf32_Sym *elf_get_sym(elf_t *e, uint32_t idx, bool dynamic) {
-    if (!e) return NULL;
-    if (dynamic) {
-        if (!e->dynsym || idx >= e->dynsym_count) return NULL;
-        return &e->dynsym[idx];
-    }
-    if (!e->symtab || idx >= e->symtab_count) return NULL;
-    return &e->symtab[idx];
-}
-
-const char *elf_sym_name(elf_t *e, Elf32_Sym *sym, bool dynamic) {
-    if (!e || !sym) return "";
-    const char *strtab = dynamic ? e->dynstr : e->strtab;
-    return strtab ? strtab + sym->st_name : "";
-}
-
-Elf32_Sym *elf_find_sym(elf_t *e, const char *name, bool dynamic) {
-    if (!e || !name) return NULL;
-    Elf32_Sym *tab = dynamic ? e->dynsym : e->symtab;
-    uint32_t count = dynamic ? e->dynsym_count : e->symtab_count;
-    if (!tab) return NULL;
-    for (uint32_t i = 0; i < count; i++) {
-        if (strcmp(elf_sym_name(e, &tab[i], dynamic), name) == 0)
-            return &tab[i];
-    }
-    return NULL;
-}
-
-bool elf_is_mapping_sym(const char *name) {
-    if (!name || name[0] != '$') return false;
-    if (name[1] == 'a' || name[1] == 't' || name[1] == 'd')
-        return (name[2] == '\0' || name[2] == '.');
-    return false;
-}
-
-void elf_print_arm_flags(uint32_t flags) {
+static void print_arm_flags(uint32_t flags) {
     printf("  ARM flags: 0x%08x\n", flags);
     printf("    EABI version: %u\n", arm_eabi_ver(flags));
     if (arm_be8(flags)) printf("    BE-8\n");
@@ -360,26 +709,31 @@ void elf_print_arm_flags(uint32_t flags) {
     if (arm_soft_float(flags)) printf("    Soft float\n");
 }
 
-void elf_print_ehdr(elf_t *e) {
-    if (!e || !e->ehdr) return;
-    Elf32_Ehdr *h = e->ehdr;
+static void print_ehdr(const elf_t *e) {
+    if (!e) return;
+    const unsigned char *ident = (const unsigned char *)e->base;
     printf("ELF Header:\n  Magic:   ");
-    for (int i = 0; i < EI_NIDENT; i++) printf("%02x ", h->e_ident[i]);
-    printf("\n  Class:                             ELF32\n");
+    for (int i = 0; i < EI_NIDENT; i++) printf("%02x ", ident[i]);
+    printf("\n  Class:                             %s\n", ELF_IS_64(e) ? "ELF64" : "ELF32");
     printf("  Data:                              %s\n",
-           h->e_ident[EI_DATA] == ELFDATA2LSB ? "little endian" : "big endian");
-    printf("  Type:                              %s\n", elf_type_str(h->e_type));
-    printf("  Machine:                           %s\n", elf_machine_str(h->e_machine));
-    printf("  Entry point address:               0x%x\n", h->e_entry);
-    printf("  Start of program headers:          %u (bytes)\n", h->e_phoff);
-    printf("  Start of section headers:          %u (bytes)\n", h->e_shoff);
-    printf("  Flags:                             0x%x\n", h->e_flags);
-    printf("  Number of program headers:         %u\n", h->e_phnum);
-    printf("  Number of section headers:         %u\n", h->e_shnum);
-    if (h->e_machine == EM_ARM && h->e_flags) elf_print_arm_flags(h->e_flags);
+           ident[EI_DATA] == ELFDATA2LSB ? "little endian" : "big endian");
+    printf("  Type:                              %s\n", elf_type_str(e->elf_type));
+    printf("  Machine:                           %s\n", elf_machine_str(e->elf_machine));
+    printf("  Entry point address:               0x%lx\n", (unsigned long)elf_entry(e));
+    if (ELF_IS_64(e)) {
+        printf("  Start of program headers:          %lu (bytes)\n", (unsigned long)e->e64.ehdr->e_phoff);
+        printf("  Start of section headers:          %lu (bytes)\n", (unsigned long)e->e64.ehdr->e_shoff);
+    } else {
+        printf("  Start of program headers:          %u (bytes)\n", e->e32.ehdr->e_phoff);
+        printf("  Start of section headers:          %u (bytes)\n", e->e32.ehdr->e_shoff);
+    }
+    printf("  Flags:                             0x%x\n", elf_flags(e));
+    printf("  Number of program headers:         %u\n", e->phnum);
+    printf("  Number of section headers:         %u\n", e->shnum);
+    if (e->elf_machine == EM_ARM && elf_flags(e)) print_arm_flags(elf_flags(e));
 }
 
-static void print_shflags(uint32_t flags) {
+static void print_shflags(uint64_t flags) {
     char buf[16] = {0}; int i = 0;
     if (flags & SHF_WRITE) buf[i++] = 'W';
     if (flags & SHF_ALLOC) buf[i++] = 'A';
@@ -390,37 +744,48 @@ static void print_shflags(uint32_t flags) {
     printf("%s", buf);
 }
 
-void elf_print_shdrs(elf_t *e) {
-    if (!e || !e->shdrs) { printf("No section headers.\n"); return; }
+static void print_shdrs(const elf_t *e) {
+    if (!e || e->shnum == 0) { printf("No section headers.\n"); return; }
+    int w = ADDR_WIDTH(e);
     printf("\nSection Headers:\n");
-    printf("  [Nr] %-17s %-15s %-8s %-6s %-6s ES Flg Lk Inf Al\n",
-           "Name", "Type", "Addr", "Off", "Size");
-    for (uint32_t i = 0; i < e->ehdr->e_shnum; i++) {
-        Elf32_Shdr *sh = &e->shdrs[i];
-        printf("  [%2u] %-17.17s %-15s %08x %06x %06x %02x ",
-               i, elf_section_name(e, sh), elf_shtype_str(sh->sh_type),
-               sh->sh_addr, sh->sh_offset, sh->sh_size, sh->sh_entsize);
-        print_shflags(sh->sh_flags);
-        printf(" %2u %3u %2u\n", sh->sh_link, sh->sh_info, sh->sh_addralign);
+    printf("  [Nr] %-*s %-*s %-*s %-*s %-*s ES Flg Lk Inf Al\n",
+           FMT_NAME_W, "Name", FMT_TYPE_W, "Type", w, "Address",
+           FMT_OFFSET_W, "Off", FMT_SIZE_W, "Size");
+    for (uint32_t i = 0; i < e->shnum; i++) {
+        printf("  [%2u] %-*.*s %-*s %0*lx %0*lx %0*lx %0*lx ",
+               i, FMT_NAME_W, FMT_NAME_W, elf_sh_name(e, i),
+               FMT_TYPE_W, elf_shtype_str(elf_sh_type(e, i), e->elf_machine),
+               w, (unsigned long)elf_sh_addr(e, i),
+               FMT_OFFSET_W, (unsigned long)elf_sh_offset(e, i),
+               FMT_SIZE_W, (unsigned long)elf_sh_size(e, i),
+               FMT_ENTSIZE_W, (unsigned long)elf_sh_entsize(e, i));
+        print_shflags(elf_sh_flags(e, i));
+        printf(" %*u %3u %2lu\n", FMT_SHNDX_W, elf_sh_link(e, i), elf_sh_info(e, i),
+               (unsigned long)elf_sh_addralign(e, i));
     }
 }
 
-void elf_print_phdrs(elf_t *e) {
-    if (!e || !e->phdrs || e->ehdr->e_phnum == 0) {
+static void print_phdrs(const elf_t *e) {
+    if (!e || e->phnum == 0) {
         printf("\nNo program headers.\n"); return;
     }
+    int w = ADDR_WIDTH(e);
     printf("\nProgram Headers:\n");
-    printf("  %-14s %-8s %-8s %-8s %-7s %-7s Flg Align\n",
-           "Type", "Offset", "VirtAddr", "PhysAddr", "FileSiz", "MemSiz");
-    for (uint32_t i = 0; i < e->ehdr->e_phnum; i++) {
-        Elf32_Phdr *ph = &e->phdrs[i];
-        printf("  %-14s 0x%06x 0x%08x 0x%08x 0x%05x 0x%05x %c%c%c 0x%x\n",
-               elf_phtype_str(ph->p_type), ph->p_offset, ph->p_vaddr, ph->p_paddr,
-               ph->p_filesz, ph->p_memsz,
-               (ph->p_flags & PF_R) ? 'R' : ' ', (ph->p_flags & PF_W) ? 'W' : ' ',
-               (ph->p_flags & PF_X) ? 'X' : ' ', ph->p_align);
-        if (ph->p_type == PT_INTERP && ph->p_filesz > 0)
-            printf("      [Interpreter: %s]\n", (const char *)e->base + ph->p_offset);
+    printf("  %-14s %-8s %-*s %-*s %-7s %-7s Flg Align\n",
+           "Type", "Offset", w, "VirtAddr", w, "PhysAddr", "FileSiz", "MemSiz");
+    for (uint32_t i = 0; i < e->phnum; i++) {
+        uint32_t flags = elf_ph_flags(e, i);
+        printf("  %-14s 0x%0*lx 0x%0*lx 0x%0*lx 0x%05lx 0x%05lx %c%c%c 0x%lx\n",
+               elf_phtype_str(elf_ph_type(e, i), e->elf_machine),
+               FMT_OFFSET_W, (unsigned long)elf_ph_offset(e, i),
+               w, (unsigned long)elf_ph_vaddr(e, i),
+               w, (unsigned long)elf_ph_paddr(e, i),
+               (unsigned long)elf_ph_filesz(e, i),
+               (unsigned long)elf_ph_memsz(e, i),
+               (flags & PF_R) ? 'R' : ' ', (flags & PF_W) ? 'W' : ' ',
+               (flags & PF_X) ? 'X' : ' ', (unsigned long)elf_ph_align(e, i));
+        if (elf_ph_type(e, i) == PT_INTERP && elf_ph_filesz(e, i) > 0)
+            printf("      [Interpreter: %s]\n", (const char *)e->base + elf_ph_offset(e, i));
     }
 }
 
@@ -429,139 +794,193 @@ void elf_print_phdrs(elf_t *e) {
  * Or:  S ∈ P  ⇔  [ S.sh_addr, S.sh_addr + S.sh_size )  ⊆  [ P.p_vaddr, P.p_vaddr + P.p_memsz )
  * For SHT_NULL or sections with sh_addr == 0, we use file offset comparison.
  */
-void elf_print_section_to_segment(elf_t *e) {
-    if (!e || !e->phdrs || !e->shdrs || e->ehdr->e_phnum == 0) return;
+static void print_section_to_segment(const elf_t *e) {
+    if (!e || e->phnum == 0 || e->shnum == 0) return;
 
     printf("\n Section to Segment mapping:\n");
     printf("  Segment Sections...\n");
 
-    for (uint32_t i = 0; i < e->ehdr->e_phnum; i++) {
-        Elf32_Phdr *ph = &e->phdrs[i];
+    for (uint32_t i = 0; i < e->phnum; i++) {
         printf("   %02u     ", i);
+        uint64_t ph_vaddr = elf_ph_vaddr(e, i);
+        uint64_t ph_memsz = elf_ph_memsz(e, i);
+        uint64_t ph_offset = elf_ph_offset(e, i);
+        uint64_t ph_filesz = elf_ph_filesz(e, i);
 
-        for (uint32_t j = 0; j < e->ehdr->e_shnum; j++) {
-            Elf32_Shdr *sh = &e->shdrs[j];
-
-            if (sh->sh_type == SHT_NULL) continue;
+        for (uint32_t j = 0; j < e->shnum; j++) {
+            uint32_t sh_type = elf_sh_type(e, j);
+            if (sh_type == SHT_NULL) continue;
 
             bool in_segment = false;
+            uint64_t sh_flags = elf_sh_flags(e, j);
+            uint64_t sh_addr = elf_sh_addr(e, j);
+            uint64_t sh_size = elf_sh_size(e, j);
+            uint64_t sh_offset = elf_sh_offset(e, j);
 
-            if (sh->sh_flags & SHF_ALLOC) {
-                /* Allocated sections: sh_addr */
-                uint32_t sh_end = sh->sh_addr + sh->sh_size;
-                uint32_t ph_end = ph->p_vaddr + ph->p_memsz;
-                in_segment = (sh->sh_addr >= ph->p_vaddr && sh_end <= ph_end);
-            } else if (sh->sh_size > 0 && ph->p_filesz > 0) {
+            if (sh_flags & SHF_ALLOC) {
+                /* Allocated sections: use sh_addr */
+                uint64_t sh_end = sh_addr + sh_size;
+                uint64_t ph_end = ph_vaddr + ph_memsz;
+                in_segment = (sh_addr >= ph_vaddr && sh_end <= ph_end);
+            } else if (sh_size > 0 && ph_filesz > 0) {
                 /* Non-allocated sections (debug, etc): use sh_offset */
-                uint32_t sh_end = sh->sh_offset + sh->sh_size;
-                uint32_t ph_end = ph->p_offset + ph->p_filesz;
-                in_segment = (sh->sh_offset >= ph->p_offset && sh_end <= ph_end);
+                uint64_t sh_end = sh_offset + sh_size;
+                uint64_t ph_end = ph_offset + ph_filesz;
+                in_segment = (sh_offset >= ph_offset && sh_end <= ph_end);
             }
 
             if (in_segment)
-                printf("%s ", elf_section_name(e, sh));
+                printf("%s ", elf_sh_name(e, j));
         }
         printf("\n");
     }
 }
 
-void elf_print_symtab(elf_t *e, bool dynamic) {
+static void print_symtab(const elf_t *e, bool dynamic) {
     if (!e) return;
-    Elf32_Sym *tab = dynamic ? e->dynsym : e->symtab;
     uint32_t count = dynamic ? e->dynsym_count : e->symtab_count;
     const char *tabname = dynamic ? ".dynsym" : ".symtab";
-    if (!tab || count == 0) { printf("\nNo %s.\n", tabname); return; }
+    
+    /* Check if table exists */
+    bool has_table = ELF_IS_64(e) 
+        ? (dynamic ? e->e64.dynsym != NULL : e->e64.symtab != NULL)
+        : (dynamic ? e->e32.dynsym != NULL : e->e32.symtab != NULL);
+    
+    if (!has_table || count == 0) { printf("\nNo %s.\n", tabname); return; }
 
+    int w = ADDR_WIDTH(e);
     printf("\nSymbol table '%s' contains %u entries:\n", tabname, count);
-    printf("   Num:    Value  Size Type    Bind   Vis      Ndx Name\n");
+    printf("   Num:    %-*s  Size Type    Bind   Vis      Ndx Name\n", w, "Value");
     for (uint32_t i = 0; i < count; i++) {
-        Elf32_Sym *sym = &tab[i];
         char ndx[8];
-        switch (sym->st_shndx) {
+        uint16_t shndx = elf_sym_shndx(e, i, dynamic);
+        switch (shndx) {
             case SHN_UNDEF: strcpy(ndx, "UND"); break;
             case SHN_ABS: strcpy(ndx, "ABS"); break;
             case SHN_COMMON: strcpy(ndx, "COM"); break;
-            default: snprintf(ndx, sizeof(ndx), "%3u", sym->st_shndx);
+            default: snprintf(ndx, sizeof(ndx), "%3u", shndx);
         }
-        printf("  %4u: %08x %5u %-7s %-6s %-8s %s %s",
-               i, sym->st_value, sym->st_size, elf_sym_type_str(sym->st_info),
-               elf_sym_bind_str(sym->st_info), sym_vis_str(sym->st_other),
-               ndx, elf_sym_name(e, sym, dynamic));
-        if (ELF32_ST_TYPE(sym->st_info) == STT_FUNC && (sym->st_value & 1))
+        uint8_t info = elf_sym_info(e, i, dynamic);
+        uint64_t value = elf_sym_value(e, i, dynamic);
+        printf("  %4u: %0*lx %*lu %-7s %-6s %-8s %s %s",
+               i, w, (unsigned long)value,
+               FMT_SYMSIZE_W, (unsigned long)elf_sym_size(e, i, dynamic),
+               elf_sym_type_str(info), elf_sym_bind_str(info), 
+               elf_sym_vis_str(elf_sym_other(e, i, dynamic)),
+               ndx, elf_sym_name(e, i, dynamic));
+        /* THUMB indicator for ARM32 only */
+        if (e->elf_machine == EM_ARM && ELF32_ST_TYPE(info) == STT_FUNC && (value & 1))
             printf(" [THUMB]");
         printf("\n");
     }
 }
 
-void elf_print_relocs(elf_t *e, Elf32_Shdr *reloc_sh) {
-    if (!e || !reloc_sh) return;
-    if (reloc_sh->sh_type != SHT_REL && reloc_sh->sh_type != SHT_RELA) return;
+static void print_relocs(const elf_t *e, uint32_t reloc_idx) {
+    if (!e || reloc_idx >= e->shnum) return;
+    uint32_t sh_type = elf_sh_type(e, reloc_idx);
+    if (sh_type != SHT_REL && sh_type != SHT_RELA) return;
 
-    bool is_rela = (reloc_sh->sh_type == SHT_RELA);
-    Elf32_Shdr *sym_sh = elf_get_shdr(e, reloc_sh->sh_link);
-    bool use_dynsym = (sym_sh && sym_sh->sh_type == SHT_DYNSYM);
-    uint32_t count = reloc_sh->sh_size / reloc_sh->sh_entsize;
+    bool is_rela = (sh_type == SHT_RELA);
+    uint32_t sym_sh_idx = elf_sh_link(e, reloc_idx);
+    bool use_dynsym = (sym_sh_idx < e->shnum && elf_sh_type(e, sym_sh_idx) == SHT_DYNSYM);
+    uint64_t entsize = elf_sh_entsize(e, reloc_idx);
+    if (entsize == 0) return;
+    uint32_t count = elf_sh_size(e, reloc_idx) / entsize;
+    int w = ADDR_WIDTH(e);
 
-    printf("\nRelocation section '%s' at offset 0x%x contains %u entries:\n",
-           elf_section_name(e, reloc_sh), reloc_sh->sh_offset, count);
-    printf(" Offset     Info    Type                Sym.Value  Sym.Name%s\n",
+    printf("\nRelocation section '%s' at offset 0x%lx contains %u entries:\n",
+           elf_sh_name(e, reloc_idx), (unsigned long)elf_sh_offset(e, reloc_idx), count);
+    printf(" %-*s  %-*s %-*s %-*s  Sym.Name%s\n",
+           w, "Offset", w, "Info", FMT_RELTYPE_W, "Type", w, "Sym.Value",
            is_rela ? " + Addend" : "");
 
-    void *data = elf_section_data(e, reloc_sh);
+    void *data = elf_sh_data(e, reloc_idx);
     if (!data) return;
 
     for (uint32_t i = 0; i < count; i++) {
-        uint32_t offset, info; int32_t addend = 0;
-        if (is_rela) {
-            Elf32_Rela *r = &((Elf32_Rela *)data)[i];
-            offset = r->r_offset; info = r->r_info; addend = r->r_addend;
+        uint64_t offset, info, sym_val;
+        uint32_t sym_idx, type;
+        int64_t addend = 0;
+        const char *sym_name;
+
+        if (ELF_IS_64(e)) {
+            if (is_rela) {
+                Elf64_Rela *r = &((Elf64_Rela *)data)[i];
+                offset = r->r_offset;
+                info = r->r_info;
+                sym_idx = ELF64_R_SYM(info);
+                type = ELF64_R_TYPE(info);
+                addend = r->r_addend;
+            } else {
+                Elf64_Rel *r = &((Elf64_Rel *)data)[i];
+                offset = r->r_offset;
+                info = r->r_info;
+                sym_idx = ELF64_R_SYM(info);
+                type = ELF64_R_TYPE(info);
+            }
         } else {
-            Elf32_Rel *r = &((Elf32_Rel *)data)[i];
-            offset = r->r_offset; info = r->r_info;
+            if (is_rela) {
+                Elf32_Rela *r = &((Elf32_Rela *)data)[i];
+                offset = r->r_offset;
+                info = r->r_info;
+                sym_idx = ELF32_R_SYM(info);
+                type = ELF32_R_TYPE(info);
+                addend = r->r_addend;
+            } else {
+                Elf32_Rel *r = &((Elf32_Rel *)data)[i];
+                offset = r->r_offset;
+                info = r->r_info;
+                sym_idx = ELF32_R_SYM(info);
+                type = ELF32_R_TYPE(info);
+            }
         }
-        uint32_t sym_idx = ELF32_R_SYM(info);
-        uint8_t type = ELF32_R_TYPE(info);
-        Elf32_Sym *sym = elf_get_sym(e, sym_idx, use_dynsym);
-        const char *sym_name = sym ? elf_sym_name(e, sym, use_dynsym) : "";
-        uint32_t sym_val = sym ? sym->st_value : 0;
+
+        sym_val = elf_sym_value(e, sym_idx, use_dynsym);
+        sym_name = elf_sym_name(e, sym_idx, use_dynsym);
 
         if (is_rela)
-            printf("%08x  %08x %-20s %08x   %s + %x\n",
-                   offset, info, elf_reloc_type_str(type), sym_val, sym_name, addend);
+            printf("%0*lx  %0*lx %-*s %0*lx   %s + %lx\n",
+                   w, (unsigned long)offset, w, (unsigned long)info,
+                   FMT_RELTYPE_W, elf_reloc_type_str(e->elf_machine, type),
+                   w, (unsigned long)sym_val, sym_name, (unsigned long)addend);
         else
-            printf("%08x  %08x %-20s %08x   %s\n",
-                   offset, info, elf_reloc_type_str(type), sym_val, sym_name);
+            printf("%0*lx  %0*lx %-*s %0*lx   %s\n",
+                   w, (unsigned long)offset, w, (unsigned long)info,
+                   FMT_RELTYPE_W, elf_reloc_type_str(e->elf_machine, type),
+                   w, (unsigned long)sym_val, sym_name);
     }
 }
 
-void elf_print_all_relocs(elf_t *e) {
-    if (!e || !e->shdrs) return;
+static void print_all_relocs(const elf_t *e) {
+    if (!e || e->shnum == 0) return;
     bool found = false;
-    for (uint32_t i = 0; i < e->ehdr->e_shnum; i++) {
-        Elf32_Shdr *sh = &e->shdrs[i];
-        if (sh->sh_type == SHT_REL || sh->sh_type == SHT_RELA) {
-            elf_print_relocs(e, sh); found = true;
+    for (uint32_t i = 0; i < e->shnum; i++) {
+        uint32_t type = elf_sh_type(e, i);
+        if (type == SHT_REL || type == SHT_RELA) {
+            print_relocs(e, i); found = true;
         }
     }
     if (!found) printf("\nNo relocations.\n");
 }
 
-void elf_print_dynamic(elf_t *e) {
-    if (!e || !e->dynamic || e->dynamic_count == 0) {
+static void print_dynamic(const elf_t *e) {
+    if (!e || e->dynamic_count == 0) {
         printf("\nNo dynamic section.\n"); return;
     }
+    int w = ADDR_WIDTH(e);
     printf("\nDynamic section contains %u entries:\n", e->dynamic_count);
-    printf("  Tag        Type                         Name/Value\n");
+    printf("  %-*s %-*s Name/Value\n", w + 2, "Tag", FMT_DYNTAG_W, "Type");
     for (uint32_t i = 0; i < e->dynamic_count; i++) {
-        Elf32_Dyn *d = &e->dynamic[i];
-        if (d->d_tag == DT_NULL) break;
-        printf(" 0x%08x %-28s ", d->d_tag, elf_dyn_tag_str(d->d_tag));
-        switch (d->d_tag) {
+        int64_t tag = elf_dyn_tag(e, i);
+        if (tag == DT_NULL) break;
+        uint64_t val = elf_dyn_val(e, i);
+        printf(" 0x%0*lx %-*s ", w, (unsigned long)tag, FMT_DYNTAG_W, elf_dyn_tag_str(tag));
+        switch (tag) {
             case DT_NEEDED: case DT_SONAME: case DT_RPATH: case DT_RUNPATH:
-                printf("%s\n", e->dynstr ? e->dynstr + d->d_un.d_val : "(null)"); break;
+                printf("%s\n", e->dynstr ? e->dynstr + val : "(null)"); break;
             case DT_PLTREL:
-                printf("%s\n", d->d_un.d_val == DT_REL ? "REL" : "RELA"); break;
-            default: printf("0x%x\n", d->d_un.d_val);
+                printf("%s\n", val == DT_REL ? "REL" : "RELA"); break;
+            default: printf("0x%lx\n", (unsigned long)val);
         }
     }
 }
@@ -653,24 +1072,26 @@ static void print_note(const char *name, uint32_t descsz, uint32_t type,
     }
 }
 
-void elf_print_notes(elf_t *e) {
-    if (!e || !e->shdrs) return;
+/* Note: Elf32_Nhdr and Elf64_Nhdr are identical - both use 32-bit fields */
+static void print_notes(const elf_t *e) {
+    if (!e || e->shnum == 0) return;
 
     bool found = false;
-    for (uint32_t i = 0; i < e->ehdr->e_shnum; i++) {
-        Elf32_Shdr *sh = &e->shdrs[i];
-        if (sh->sh_type != SHT_NOTE) continue;
-        if (!in_bounds(e, sh->sh_offset, sh->sh_size)) continue;
+    for (uint32_t i = 0; i < e->shnum; i++) {
+        if (elf_sh_type(e, i) != SHT_NOTE) continue;
+        uint64_t sh_offset = elf_sh_offset(e, i);
+        uint64_t sh_size = elf_sh_size(e, i);
+        if (!in_bounds(e, sh_offset, sh_size)) continue;
 
         if (!found) {
             printf("\nDisplaying notes found in: %s\n", e->path);
             printf("  %-16s %-11s Type\n", "Owner", "Data size");
             found = true;
         }
-        printf(" Section '%s':\n", elf_section_name(e, sh));
+        printf(" Section '%s':\n", elf_sh_name(e, i));
 
-        const uint8_t *ptr = (const uint8_t *)e->base + sh->sh_offset;
-        const uint8_t *end = ptr + sh->sh_size;
+        const uint8_t *ptr = (const uint8_t *)e->base + sh_offset;
+        const uint8_t *end = ptr + sh_size;
 
         while (ptr + sizeof(Elf32_Nhdr) <= end) {
             const Elf32_Nhdr *nhdr = (const Elf32_Nhdr *)ptr;
@@ -690,17 +1111,17 @@ void elf_print_notes(elf_t *e) {
     if (!found) printf("\nNo notes.\n");
 }
 
-void elf_dump(elf_t *e) {
+void elf_dump(const elf_t *e) {
     if (!e) return;
-    elf_print_ehdr(e);
-    elf_print_shdrs(e);
-    elf_print_phdrs(e);
-    elf_print_section_to_segment(e);
-    elf_print_symtab(e, false);
-    elf_print_symtab(e, true);
-    elf_print_all_relocs(e);
-    elf_print_dynamic(e);
-    elf_print_notes(e);
+    print_ehdr(e);
+    print_shdrs(e);
+    print_phdrs(e);
+    print_section_to_segment(e);
+    print_symtab(e, false);
+    print_symtab(e, true);
+    print_all_relocs(e);
+    print_dynamic(e);
+    print_notes(e);
 }
 
 static void usage(const char *prog) {
@@ -723,11 +1144,11 @@ int main(int argc, char **argv) {
     if (err != E_OK) { fprintf(stderr, "error: %s\n", elf.errmsg); return 1; }
 
     if (quiet) {
-        printf("File: %s\nType: %s\nMachine: %s\nEntry: 0x%x\n",
-               argv[optind], elf_type_str(elf.ehdr->e_type),
-               elf_machine_str(elf.ehdr->e_machine), elf.ehdr->e_entry);
+        printf("File: %s\nType: %s\nMachine: %s\nEntry: 0x%lx\n",
+               argv[optind], elf_type_str(elf.elf_type),
+               elf_machine_str(elf.elf_machine), (unsigned long)elf_entry(&elf));
         printf("Sections: %u, Symbols: %u + %u\n",
-               elf.ehdr->e_shnum, elf.symtab_count, elf.dynsym_count);
+               elf.shnum, elf.symtab_count, elf.dynsym_count);
     } else {
         elf_dump(&elf);
     }
