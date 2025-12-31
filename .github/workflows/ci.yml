@@ -75,6 +75,11 @@ jobs:
         run: |
           qemu-arm -L /usr/arm-linux-gnueabi build-arm32/bin/lens /tmp/test_arm
 
+      - name: Run lens test suite
+        run: |
+          cd build-arm32
+          ctest --output-on-failure -j$(nproc) # Parallel
+
   arm64-build:
     runs-on: ubuntu-24.04
     steps:
@@ -109,7 +114,7 @@ jobs:
           aarch64-linux-gnu-gcc -o /tmp/test_arm64 /tmp/test.c
           file /tmp/test_arm64
 
-      # TODO: Enable when lens supports 64-bit ARM ELF
+      # TODO: Enable when lens supports 64-bit ARM ELF (today)
       # - name: Test lens on ARM64 binary (via QEMU)
       #   run: |
       #     qemu-aarch64 -L /usr/aarch64-linux-gnu build-arm64/bin/lens /tmp/test_arm64
@@ -133,7 +138,7 @@ jobs:
             --suppress=constParameterPointer \
             src/
 
-      - name: Lint (clang-format)
+      - name: Clang-format
         uses: wearerequired/lint-action@v2
         with:
           clang_format: true

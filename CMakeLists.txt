@@ -18,3 +18,6 @@ add_subdirectory(src/lens)
 add_subdirectory(src/soul)
 add_subdirectory(src/pulse)
 add_subdirectory(src/surosam)
+
+enable_testing()
+add_subdirectory(tests)
