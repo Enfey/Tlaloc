@@ -10,7 +10,7 @@
 
 option(TLALOC_ENABLE_QEMU_TESTS "Enable tests on non-native targets" ON)
 
-set(TLALOC_TEST_COMPONENTS lens soul meld lance)
+set(TLALOC_TEST_COMPONENTS lens soul meld glue)
 
 set(MACHINE ${CMAKE_HOST_SYSTEM_PROCESSOR})
 

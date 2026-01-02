@@ -22,9 +22,9 @@ ELF interrogation and manipulation utilities for GNU/Linux.
 
 COMPONENTS
     lens      - 'fast' mmap-based ELF parser for ARM32/ARM64
-    soul      - self-erasure userspace loader
-    lance     - TBD
-    suros     - TBD
+    soul      - self-erasing userspace loader
+    meld      - static linker for ARM32
+    glue      - TBD
 
 BUILD
     One can build themselves, or use .scripts/build-native.sh for native development.
