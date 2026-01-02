@@ -1,9 +1,16 @@
 # Tlaloc test infrastructure inspired by mold's test setup, thank you (because making this work would've taken significantly more time & effort) !
-# Tests are named: <arch><bits>-<test_name>
+# Tests are named: <component>-<test_name> or <component>-<arch><bits>-<test_name>
 # https://cmake.org/cmake/help/book/mastering-cmake/chapter/Testing%20With%20CMake%20and%20CTest.html
 # Should scale reasonably well.
+#   ctest                        - Run tests
+#   ctest -R "^lens-"            - Run lens tests
+#   ctest -R "^meld-"            - Run meld tests
+#   ctest -R "arm32"             - Run ARM32 tests
+#   ctest -L lens                - Run tests with 'lens' label
 
 option(TLALOC_ENABLE_QEMU_TESTS "Enable tests on non-native targets" ON)
+
+set(TLALOC_TEST_COMPONENTS lens soul meld lance)
 
 set(MACHINE ${CMAKE_HOST_SYSTEM_PROCESSOR})
 
@@ -11,11 +18,11 @@ set(MACHINE ${CMAKE_HOST_SYSTEM_PROCESSOR})
 # with ARM64 kernel. Use `cc -dumpmachine` to get the real target triple.
 execute_process(COMMAND ${CMAKE_C_COMPILER} -dumpmachine
   RESULT_VARIABLE EXIT_CODE
-  OUTPUT_VARIABLE ARCH
+  OUTPUT_VARIABLE COMPILER_TARGET_TRIPLE
   OUTPUT_STRIP_TRAILING_WHITESPACE
   ERROR_QUIET)
 
-if(NOT EXIT_CODE AND ARCH MATCHES "([^-]+).*")
+if(NOT EXIT_CODE AND COMPILER_TARGET_TRIPLE MATCHES "([^-]+).*")
   set(MACHINE ${CMAKE_MATCH_1})
 endif()
 
@@ -29,7 +36,17 @@ elseif(${MACHINE} STREQUAL "aarch64")
   set(MACHINE aarch64)
 endif()
 
+# IMPORTANT: We use NATIVE_TRIPLE (from -dumpmachine) instead of CMAKE_C_COMPILER
+# because CMAKE_C_COMPILER is a full path (e.g., "/usr/bin/arm-linux-gnueabi-gcc")
+# which would break QEMU sysroot: "/usr/${TRIPLE}" -> "/usr//usr/bin/..." (wrong!)
+if(COMPILER_TARGET_TRIPLE)
+  set(NATIVE_TRIPLE ${COMPILER_TARGET_TRIPLE})
+else()
+  set(NATIVE_TRIPLE "")
+endif()
+
 message(STATUS "Test target machine: ${MACHINE}")
+message(STATUS "Compiler target triple: ${NATIVE_TRIPLE}")
 
 if(TLALOC_ENABLE_QEMU_TESTS)
   # Architectures we support testing
@@ -56,91 +73,178 @@ if(TLALOC_ENABLE_QEMU_TESTS)
   endforeach()
 endif()
 
-function(add_target ARCH BITS TRIPLE)
-  set(QEMU_ARCH ${ARGV3}) 
+# Registers a single test for a component
+#
+# Args(non-obvious):
+#   COMPONENT 
+#   TEST_PATH 
+#   TESTNAME   - Full test name for ctest
+#   ARCH       - Target architecture (arm, aarch64)
+#   BITS       - Bit width (32, 64)
+#   TRIPLE     - Toolchain triple
+#   IS_NATIVE  - Whether target matches host
+#   NEEDS_QEMU - Whether component binary needs QEMU to run (was cross-compiled )
+#
+function(register_test COMPONENT TEST_PATH TESTNAME ARCH BITS TRIPLE IS_NATIVE NEEDS_QEMU)
+  set(QEMU_ARCH ${ARCH})
 
-  if(NOT QEMU_ARCH)
-    set(QEMU_ARCH ${ARCH})
+  add_test(NAME ${TESTNAME}
+    COMMAND bash -x ${CMAKE_CURRENT_LIST_DIR}/${TEST_PATH}
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+  # Add component label for filtering (ctest -L lens)
+  set_property(TEST ${TESTNAME} PROPERTY LABELS ${COMPONENT})
+
+  # Common env vars
+  set_property(TEST ${TESTNAME} APPEND PROPERTY ENVIRONMENT
+    "MACHINE=${MACHINE}"
+    "ARCH=${ARCH}"
+    "BITS=${BITS}"
+    "TRIPLE=${TRIPLE}"
+    "${COMPONENT}=${CMAKE_BINARY_DIR}/bin/${COMPONENT}")
+
+  string(TOUPPER ${COMPONENT} COMPONENT_UPPER)
+  set_property(TEST ${TESTNAME} APPEND PROPERTY ENVIRONMENT
+    "${COMPONENT_UPPER}=${CMAKE_BINARY_DIR}/bin/${COMPONENT}")
+
+  if(NEEDS_QEMU)
+    set(QEMU_SYSROOT "/usr/${TRIPLE}")
+    set_property(TEST ${TESTNAME} APPEND PROPERTY ENVIRONMENT
+      "QEMU_${COMPONENT_UPPER}=qemu-${QEMU_ARCH} -L ${QEMU_SYSROOT}")
   endif()
 
+  if(IS_NATIVE)
+    set_property(TEST ${TESTNAME} APPEND PROPERTY ENVIRONMENT
+      "CC=${CMAKE_C_COMPILER}"
+      "READELF=readelf"
+      "OBJDUMP=objdump")
+    set_property(TEST ${TESTNAME} APPEND PROPERTY SKIP_REGULAR_EXPRESSION
+      "skipped")
+  else()
+    set_property(TEST ${TESTNAME} APPEND PROPERTY ENVIRONMENT
+      "CC=${TRIPLE}-gcc"
+      "READELF=${TRIPLE}-readelf"
+      "OBJDUMP=${TRIPLE}-objdump")
+  endif()
+endfunction()
+
+function(add_component_arch_tests COMPONENT ARCH BITS TRIPLE)
   if(${ARCH} STREQUAL ${MACHINE})
     set(IS_NATIVE 1)
+  else()
+    set(IS_NATIVE 0)
   endif()
 
-  # Determine if lens itself needs QEMU to run
-  # (when lens is cross-compiled for a different architecture)
   if(CMAKE_CROSSCOMPILING)
-    set(LENS_NEEDS_QEMU 1)
+    set(NEEDS_QEMU 1)
+  else()
+    set(NEEDS_QEMU 0)
   endif()
 
-  # Find all generic tests (not arch-specific)
-  file(GLOB ALL_TESTS RELATIVE ${CMAKE_CURRENT_LIST_DIR} CONFIGURE_DEPENDS
-    "lens/*.sh")
+  # Pattern: arch-arm32-*.sh or arch-aarch64-*.sh
+  if(${ARCH} STREQUAL "arm")
+    set(ARCH_PATTERN "arch-arm${BITS}")
+  else()
+    set(ARCH_PATTERN "arch-${ARCH}")
+  endif()
 
-  # Exclude arch-specific tests from generic tests
-  list(FILTER ALL_TESTS EXCLUDE REGEX "^lens/arch-")
-
-  # Find arch-specific tests
   file(GLOB ARCH_TESTS RELATIVE ${CMAKE_CURRENT_LIST_DIR} CONFIGURE_DEPENDS
-    "lens/arch-${ARCH}${BITS}-*.sh")
+    "${COMPONENT}/${ARCH_PATTERN}-*.sh")
 
-  list(APPEND TESTS ${ALL_TESTS} ${ARCH_TESTS})
-
-  foreach(TEST IN LISTS TESTS)
-    # lens/foo.sh -> foo
+  foreach(TEST IN LISTS ARCH_TESTS)
+    # lens/arch-arm32-thumb.sh -> thumb
     get_filename_component(TEST_BASENAME ${TEST} NAME_WE)
-    string(REGEX REPLACE "^arch-${ARCH}${BITS}-" "" TEST_BASENAME "${TEST_BASENAME}")
+    string(REGEX REPLACE "^${ARCH_PATTERN}-" "" TEST_BASENAME "${TEST_BASENAME}")
 
-    set(TESTNAME "${ARCH}${BITS}-${TEST_BASENAME}")
+    # Test name: lens-arm32-thumb
+    set(TESTNAME "${COMPONENT}-${ARCH_PATTERN}-${TEST_BASENAME}")
+    string(REGEX REPLACE "-arch-" "-" TESTNAME "${TESTNAME}")
 
-    add_test(NAME ${TESTNAME}
-      COMMAND bash -x ${CMAKE_CURRENT_LIST_DIR}/${TEST}
-      WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-
-    set_property(TEST ${TESTNAME} APPEND PROPERTY ENVIRONMENT
-      "MACHINE=${MACHINE}"
-      "ARCH=${ARCH}"
-      "BITS=${BITS}"
-      "LENS=${CMAKE_BINARY_DIR}/bin/lens"
-      "TRIPLE=${TRIPLE}")
-
-    # Set QEMU_LENS if lens itself was cross-compiled
-    if(LENS_NEEDS_QEMU)
-      set(QEMU_SYSROOT "/usr/${TRIPLE}")
-      set_property(TEST ${TESTNAME} APPEND PROPERTY ENVIRONMENT
-        "QEMU_LENS=qemu-${QEMU_ARCH} -L ${QEMU_SYSROOT}")
-    endif()
-
-    if(IS_NATIVE)
-      # lens target arch matches test binary arch
-      set_property(TEST ${TESTNAME} APPEND PROPERTY ENVIRONMENT
-        "CC=${CMAKE_C_COMPILER}")
-      set_property(TEST ${TESTNAME} APPEND PROPERTY SKIP_REGULAR_EXPRESSION
-        "skipped")
-    else()
-      # need cross-compiler to create test binaries
-      set_property(TEST ${TESTNAME} APPEND PROPERTY ENVIRONMENT
-        "CC=${TRIPLE}-gcc"
-        "READELF=${TRIPLE}-readelf"
-        "OBJDUMP=${TRIPLE}-objdump")
-    endif()
+    register_test(${COMPONENT} ${TEST} ${TESTNAME} ${ARCH} ${BITS} ${TRIPLE} ${IS_NATIVE} ${NEEDS_QEMU})
   endforeach()
 endfunction()
 
-# Add ARM32 tests
+function(add_component_generic_tests COMPONENT ARCH BITS TRIPLE)
+  if(${ARCH} STREQUAL ${MACHINE})
+    set(IS_NATIVE 1)
+  else()
+    set(IS_NATIVE 0)
+  endif()
+
+  if(CMAKE_CROSSCOMPILING)
+    set(NEEDS_QEMU 1)
+  else()
+    set(NEEDS_QEMU 0)
+  endif()
+
+  file(GLOB GENERIC_TESTS RELATIVE ${CMAKE_CURRENT_LIST_DIR} CONFIGURE_DEPENDS
+    "${COMPONENT}/*.sh")
+  list(FILTER GENERIC_TESTS EXCLUDE REGEX "^${COMPONENT}/arch-")
+
+  foreach(TEST IN LISTS GENERIC_TESTS)
+    get_filename_component(TEST_BASENAME ${TEST} NAME_WE)
+
+    # Test name e.g., lens-pie etc.
+    set(TESTNAME "${COMPONENT}-${TEST_BASENAME}")
+
+    register_test(${COMPONENT} ${TEST} ${TESTNAME} ${ARCH} ${BITS} ${TRIPLE} ${IS_NATIVE} ${NEEDS_QEMU})
+  endforeach()
+endfunction()
+
+function(add_component_tests COMPONENT ARCH BITS TRIPLE)
+  add_component_arch_tests(${COMPONENT} ${ARCH} ${BITS} ${TRIPLE})
+  add_component_generic_tests(${COMPONENT} ${ARCH} ${BITS} ${TRIPLE})
+endfunction()
+
+macro(register_all_arch_tests ARCH BITS TRIPLE)
+  foreach(COMPONENT IN LISTS TLALOC_TEST_COMPONENTS)
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${COMPONENT}")
+      add_component_arch_tests(${COMPONENT} ${ARCH} ${BITS} ${TRIPLE})
+    endif()
+  endforeach()
+endmacro()
+
+macro(register_all_generic_tests ARCH BITS TRIPLE)
+  foreach(COMPONENT IN LISTS TLALOC_TEST_COMPONENTS)
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${COMPONENT}")
+      add_component_generic_tests(${COMPONENT} ${ARCH} ${BITS} ${TRIPLE})
+    endif()
+  endforeach()
+endmacro()
+
+
 if(${MACHINE} STREQUAL "arm")
-  add_target(arm 32 ${CMAKE_C_COMPILER})
+  register_all_arch_tests(arm 32 ${NATIVE_TRIPLE})
 elseif(HAS_qemu-arm)
   if(HAS_arm-linux-gnueabihf-gcc)
-    add_target(arm 32 arm-linux-gnueabihf)
+    register_all_arch_tests(arm 32 arm-linux-gnueabihf)
   elseif(HAS_arm-linux-gnueabi-gcc)
-    add_target(arm 32 arm-linux-gnueabi)
+    register_all_arch_tests(arm 32 arm-linux-gnueabi)
   endif()
 endif()
 
-# Add ARM64 tests (when I add support to lens that is)
-# if(${MACHINE} STREQUAL "aarch64")
-#   add_target(aarch64 64 ${CMAKE_C_COMPILER})
-# elseif(HAS_qemu-aarch64 AND HAS_aarch64-linux-gnu-gcc)
-#   add_target(aarch64 64 aarch64-linux-gnu)
-# endif()
+if(${MACHINE} STREQUAL "aarch64")
+  register_all_arch_tests(aarch64 64 ${NATIVE_TRIPLE})
+elseif(HAS_qemu-aarch64 AND HAS_aarch64-linux-gnu-gcc)
+  register_all_arch_tests(aarch64 64 aarch64-linux-gnu)
+endif()
+
+message(STATUS "Registered arch-specific tests for ARM32 and AArch64")
+
+
+if(${MACHINE} STREQUAL "aarch64")
+  register_all_generic_tests(aarch64 64 ${NATIVE_TRIPLE})
+elseif(HAS_qemu-aarch64 AND HAS_aarch64-linux-gnu-gcc)
+  register_all_generic_tests(aarch64 64 aarch64-linux-gnu)
+elseif(${MACHINE} STREQUAL "arm")
+  register_all_generic_tests(arm 32 ${NATIVE_TRIPLE})
+elseif(HAS_qemu-arm)
+  if(HAS_arm-linux-gnueabihf-gcc)
+    register_all_generic_tests(arm 32 arm-linux-gnueabihf)
+  elseif(HAS_arm-linux-gnueabi-gcc)
+    register_all_generic_tests(arm 32 arm-linux-gnueabi)
+  endif()
+endif()
+
+message(STATUS "Test components: ${TLALOC_TEST_COMPONENTS}")
+

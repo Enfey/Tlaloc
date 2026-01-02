@@ -7,4 +7,4 @@ make_arm_obj $t/obj.o
 run_lens $t/obj.o > $t/out
 
 grep -q "Type:.*REL" $t/out
-grep -q "Machine:.*ARM" $t/out
+grep -q "Machine:.*ARM\|AArch64" $t/out

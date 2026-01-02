@@ -114,10 +114,14 @@ jobs:
           aarch64-linux-gnu-gcc -o /tmp/test_arm64 /tmp/test.c
           file /tmp/test_arm64
 
-      # TODO: Enable when lens supports 64-bit ARM ELF (today)
-      # - name: Test lens on ARM64 binary (via QEMU)
-      #   run: |
-      #     qemu-aarch64 -L /usr/aarch64-linux-gnu build-arm64/bin/lens /tmp/test_arm64
+      - name: Test lens on ARM64 binary (via QEMU)
+        run: |
+          qemu-aarch64 -L /usr/aarch64-linux-gnu build-arm64/bin/lens /tmp/test_arm64
+
+      - name: Run lens ARM64 test suite
+        run: |
+          cd build-arm64
+          ctest --output-on-failure -j$(nproc)
 
   static-analysis:
     runs-on: ubuntu-24.04

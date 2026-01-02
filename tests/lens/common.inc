@@ -38,7 +38,7 @@ is_cross() {
 
 make_arm_exec() {
   local output="$1"
-  cat <<'EOF' | $CC -xc -o "$output" -
+  cat <<'EOF' | $CC -xc -no-pie -o "$output" -
 int main() { return 0; }
 EOF
 }

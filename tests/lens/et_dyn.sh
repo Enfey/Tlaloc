@@ -7,4 +7,4 @@ make_arm_so $t/lib.so
 run_lens $t/lib.so > $t/out
 
 grep -q "Type:.*DYN" $t/out
-grep -q "Machine:.*ARM" $t/out
+grep -q "Machine:.*ARM\|AArch64" $t/out

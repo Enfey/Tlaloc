@@ -31,7 +31,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc-aarch64-linux-gnu \
     g++-aarch64-linux-gnu \
     libc6-dev-arm64-cross \
-    qemu-user \
     qemu-user-static \
     cppcheck \
     clang-format \

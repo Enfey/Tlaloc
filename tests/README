@@ -1,0 +1,56 @@
+TESTING INFORMATION 
+
+OVERVIEW
+    We use CMake/CTest and QEMU to run tests for ARM32 and AArch64. Though I imagine AArch64 tests 
+    will primarily be restricted to lens and soul for the foreseeable. 
+
+STRUCTURE
+    tests/
+        CMakeLists.txt  - Test registration and build rules
+    tests/<component>/
+        *.sh            - Generic & arch-specific tests - see naming conventions for more info.
+        common.inc      - Shared shell helper functions
+
+RUNNING TESTS
+    Run all tests:
+        cd build
+        ctest
+
+    Run component tests:
+        ctest -R "^<component>-"
+        ctest -L soul                   # All soul tests (by label(expansion planned when integration tests are included, the above suffices for now.)
+
+    Run architecture-specific tests:
+        ctest -R "aarch64
+
+    Run specific test:
+        ctest -R "^lens-pie$"
+
+    Verbose:
+        ctest -V
+
+WRITING TESTS
+    1. Create a new .sh file in tests/<component>
+    2. Source common.inc
+    3. Use helper functions to compile and verify
+
+    Example:
+        #!/bin/bash
+        . $(dirname $0)/common.inc
+
+        # Create source
+        cat > $t/test.c <<EOF
+        int main() { return 0; }
+        EOF
+
+        # Compile
+        compile $t/test.c $t/test
+
+        # Verify (component binary available as $COMPONENT_NAME or $component_name)
+        $LENS $t/test | grep "Type:.*EXEC"     # lens
+        $SOUL $t/test | grep "expected output" # soul
+
+NAMING CONVENTION
+    *.sh  
+    arch-arm32-*.sh
+    arch-aarch64-*.sh

@@ -1,9 +1,6 @@
 #!/bin/bash
-# Test: lens identifies THUMB functions (ARM32 specific)
+# Test: identifies THUMB functions
 . $(dirname $0)/common.inc
-
-# Skip if not ARM32
-[[ "$BITS" == "32" && "$ARCH" == "arm" ]] || skip "ARM32 only"
 
 cat <<'EOF' | $CC -xc -mthumb -o $t/exe -
 __attribute__((target("thumb")))
