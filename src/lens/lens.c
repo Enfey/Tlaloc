@@ -56,50 +56,32 @@
 #define NT_ARM_GCS 0x410
 #endif
 
-/* Variadic, do while(0) expands the macro to a single statement syntactically so it can be used in if/else. Defensively programmed, but we assume the caller will not exceed sizeof(e->errmsg) */
-#define SET_ERR(e, code, fmt, ...) do {                                 \
-    (e)->last_err = (code);                                             \
-    snprintf((e)->errmsg, sizeof((e)->errmsg), fmt, ##__VA_ARGS__);     \
-} while (0)
-
 /* Check if [off, off+len] is within the mmap'd file. Second check catches overflow wraparound */
 static inline bool in_bounds(const elf_t *e, size_t off, size_t len) { return (off + len <= e->size) && (off + len >= off); }
 
-int elf_open(elf_t *e, const char *path) {
-    if (!e) return E_NULLPTR;
-    if (!path) { SET_ERR(e, E_NULLPTR, "path is NULL"); return E_NULLPTR; }
+/* Parse ELF from already-mapped memory.
+ * If owns_base is true, munmap on error; otherwise caller owns memory e.g., archive_open().
+ */
+static int elf_parse_internal(elf_t *e, void *base, size_t size, bool owns_base) {
+    e->base = base;
+    e->size = size;
 
-    memset(e, 0, sizeof(*e));
-    e->path = path;
-
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) { SET_ERR(e, E_MMAP, "open '%s': %s", path, strerror(errno)); return E_MMAP; }
-
-    struct stat st;
-    if (fstat(fd, &st) < 0) { SET_ERR(e, E_MMAP, "fstat: %s", strerror(errno)); close(fd); return E_MMAP; }
-    e->size = st.st_size;
-
-    if (e->size < EI_NIDENT) {
-        SET_ERR(e, E_TRUNCATED, "file too small"); close(fd); return E_TRUNCATED;
+    if (size < EI_NIDENT) {
+        if (owns_base) { munmap(base, size); e->base = NULL; }
+        SET_ERR(e, E_TRUNCATED, "file too small"); return E_TRUNCATED;
     }
 
-    void *base = mmap(NULL, e->size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (base == MAP_FAILED) { SET_ERR(e, E_MMAP, "mmap: %s", strerror(errno)); return E_MMAP; }
-    e->base = base;
-
     const unsigned char *ident = (const unsigned char *)base;
-    /* Magic number comparison */
     if (memcmp(ident, ELFMAG, SELFMAG) != 0) {
-        munmap(e->base, e->size); e->base = NULL;
+        if (owns_base) { munmap(base, size); e->base = NULL; }
         SET_ERR(e, E_NOT_ELF, "not an ELF file"); return E_NOT_ELF;
     }
 
     e->elf_class = ident[EI_CLASS];
 
     if (ELF_IS_32(e)) {
-        if (e->size < sizeof(Elf32_Ehdr)){
-            munmap(e->base, e->size); e->base = NULL;
+        if (size < sizeof(Elf32_Ehdr)) {
+            if (owns_base) { munmap(base, size); e->base = NULL; }
             SET_ERR(e, E_TRUNCATED, "truncated ELF32 header"); return E_TRUNCATED;
         }
         Elf32_Ehdr *ehdr = (Elf32_Ehdr *)base;
@@ -110,22 +92,22 @@ int elf_open(elf_t *e, const char *path) {
         e->phnum = ehdr->e_phnum;
 
         if (ehdr->e_machine != EM_ARM) {
-            munmap(e->base, e->size); e->base = NULL;
+            if (owns_base) { munmap(base, size); e->base = NULL; }
             SET_ERR(e, E_NOT_ARM, "not ARM (machine=0x%x)", e->elf_machine); return E_NOT_ARM;
         }
         if (ehdr->e_type != ET_REL && ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) {
-            munmap(e->base, e->size); e->base = NULL;
+            if (owns_base) { munmap(base, size); e->base = NULL; }
             SET_ERR(e, E_BAD_TYPE, "unsupported ELF type %d", e->elf_type); return E_BAD_TYPE;
         }
 
         if (ehdr->e_shnum > 0 && ehdr->e_shoff > 0) {
             size_t shdrs_size;
             if (__builtin_mul_overflow(ehdr->e_shnum, sizeof(Elf32_Shdr), &shdrs_size)) {
-                munmap(e->base, e->size); e->base = NULL;
+                if (owns_base) { munmap(base, size); e->base = NULL; }
                 SET_ERR(e, E_TRUNCATED, "section header count overflow"); return E_TRUNCATED;
             }
             if (!in_bounds(e, ehdr->e_shoff, shdrs_size)) {
-                munmap(e->base, e->size); e->base = NULL;
+                if (owns_base) { munmap(base, size); e->base = NULL; }
                 SET_ERR(e, E_TRUNCATED, "section headers past EOF"); return E_TRUNCATED;
             }
 
@@ -143,11 +125,11 @@ int elf_open(elf_t *e, const char *path) {
         if (ehdr->e_phnum > 0 && ehdr->e_phoff > 0) {
             size_t phdrs_size;
             if (__builtin_mul_overflow(ehdr->e_phnum, sizeof(Elf32_Phdr), &phdrs_size)) {
-                munmap(e->base, e->size); e->base = NULL;
+                if (owns_base) { munmap(base, size); e->base = NULL; }
                 SET_ERR(e, E_TRUNCATED, "program header count overflow"); return E_TRUNCATED;
             }
             if (!in_bounds(e, ehdr->e_phoff, phdrs_size)) {
-                munmap(e->base, e->size); e->base = NULL;
+                if (owns_base) { munmap(base, size); e->base = NULL; }
                 SET_ERR(e, E_TRUNCATED, "program headers past EOF"); return E_TRUNCATED;
             }
             e->e32.phdrs = (Elf32_Phdr *)((char *)base + ehdr->e_phoff);
@@ -189,8 +171,8 @@ int elf_open(elf_t *e, const char *path) {
             }
         }
     } else if (ELF_IS_64(e)) {
-        if (e->size < sizeof(Elf64_Ehdr)) {
-            munmap(e->base, e->size); e->base = NULL;
+        if (size < sizeof(Elf64_Ehdr)) {
+            if (owns_base) { munmap(base, size); e->base = NULL; }
             SET_ERR(e, E_TRUNCATED, "truncated ELF64 header"); return E_TRUNCATED;
         }
         Elf64_Ehdr *ehdr = (Elf64_Ehdr *)base;
@@ -201,23 +183,22 @@ int elf_open(elf_t *e, const char *path) {
         e->phnum = ehdr->e_phnum;
 
         if (ehdr->e_machine != EM_AARCH64) {
-            munmap(e->base, e->size); e->base = NULL;
+            if (owns_base) { munmap(base, size); e->base = NULL; }
             SET_ERR(e, E_NOT_ARM, "not AArch64 (machine=0x%x)", e->elf_machine); return E_NOT_ARM;
         }
         if (ehdr->e_type != ET_REL && ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) {
-            munmap(e->base, e->size); e->base = NULL;
+            if (owns_base) { munmap(base, size); e->base = NULL; }
             SET_ERR(e, E_BAD_TYPE, "unsupported ELF type %d", e->elf_type); return E_BAD_TYPE;
         }
 
-        /* Section headers */
         if (ehdr->e_shnum > 0 && ehdr->e_shoff > 0) {
             size_t shdrs_size;
             if (__builtin_mul_overflow(ehdr->e_shnum, sizeof(Elf64_Shdr), &shdrs_size)) {
-                munmap(e->base, e->size); e->base = NULL;
+                if (owns_base) { munmap(base, size); e->base = NULL; }
                 SET_ERR(e, E_TRUNCATED, "section header count overflow"); return E_TRUNCATED;
             }
             if (!in_bounds(e, ehdr->e_shoff, shdrs_size)) {
-                munmap(e->base, e->size); e->base = NULL;
+                if (owns_base) { munmap(base, size); e->base = NULL; }
                 SET_ERR(e, E_TRUNCATED, "section headers past EOF"); return E_TRUNCATED;
             }
             e->e64.shdrs = (Elf64_Shdr *)((char *)base + ehdr->e_shoff);
@@ -234,11 +215,11 @@ int elf_open(elf_t *e, const char *path) {
         if (ehdr->e_phnum > 0 && ehdr->e_phoff > 0) {
             size_t phdrs_size;
             if (__builtin_mul_overflow(ehdr->e_phnum, sizeof(Elf64_Phdr), &phdrs_size)) {
-                munmap(e->base, e->size); e->base = NULL;
+                if (owns_base) { munmap(base, size); e->base = NULL; }
                 SET_ERR(e, E_TRUNCATED, "program header count overflow"); return E_TRUNCATED;
             }
             if (!in_bounds(e, ehdr->e_phoff, phdrs_size)) {
-                munmap(e->base, e->size); e->base = NULL;
+                if (owns_base) { munmap(base, size); e->base = NULL; }
                 SET_ERR(e, E_TRUNCATED, "program headers past EOF"); return E_TRUNCATED;
             }
             e->e64.phdrs = (Elf64_Phdr *)((char *)base + ehdr->e_phoff);
@@ -280,26 +261,62 @@ int elf_open(elf_t *e, const char *path) {
             }
         }
     } else {
-        munmap(e->base, e->size); e->base = NULL;
+        if (owns_base) { munmap(base, size); e->base = NULL; }
         SET_ERR(e, E_BAD_CLASS, "unsupported ELF class %d", e->elf_class); return E_BAD_CLASS;
     }
 
     return E_OK;
 }
 
+int elf_open(elf_t *e, const char *path) {
+    if (!e) return E_NULLPTR;
+    if (!path) { SET_ERR(e, E_NULLPTR, "path is NULL"); return E_NULLPTR; }
+
+    memset(e, 0, sizeof(*e));
+    e->path = path;
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) { SET_ERR(e, E_MMAP, "open '%s': %s", path, strerror(errno)); return E_MMAP; }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) { SET_ERR(e, E_MMAP, "fstat: %s", strerror(errno)); close(fd); return E_MMAP; }
+
+    void *base = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (base == MAP_FAILED) { SET_ERR(e, E_MMAP, "mmap: %s", strerror(errno)); return E_MMAP; }
+
+    return elf_parse_internal(e, base, st.st_size, true);
+}
+
+int elf_open_mem(elf_t *e, const void *data, size_t size) {
+    if (!e) return E_NULLPTR;
+    if (!data) { SET_ERR(e, E_NULLPTR, "data is NULL"); return E_NULLPTR; }
+    if (size == 0) { SET_ERR(e, E_TRUNCATED, "size is 0"); return E_TRUNCATED; }
+
+    memset(e, 0, sizeof(*e));
+    e->path = "(memory)";
+
+    /* For memory buffers, caller owns memory */
+    return elf_parse_internal(e, (void *)data, size, false);
+}
+
 void elf_close(elf_t *e) {
     if (!e) return;
-    if (e->base && e->base != MAP_FAILED) munmap(e->base, e->size);
+    /* Only unmap if we own the memory (path != "(memory)") */
+    if (e->base && e->base != MAP_FAILED && e->path && strcmp(e->path, "(memory)") != 0) {
+        munmap(e->base, e->size);
+    }
     memset(e, 0, sizeof(*e));
 }
 
 /*
  * Index-based accessors - all return widest type (uint64_t) to unify the API.
  * These are marked hot because they're all called frequently during linking. 
- * 
+ * https://gcc.gnu.org/onlinedocs/gcc-15.2.0/gcc/Common-Function-Attributes.html#index-hot-function-attribute:~:text=its%20special%20behavior.-,hot,-%C2%B6
  * The branch predictor will learn elf_class very quickly, as it remains the
  * same for a given elf_t.
  */
+
 __attribute__((hot))
 uint64_t elf_sh_addr(const elf_t *e, uint32_t i) {
     if (!e || i >= e->shnum) return 0;
@@ -650,7 +667,7 @@ const char *elf_reloc_type_str(uint16_t machine, uint32_t type) {
         }
     }
     switch (type) {
-        case R_ARM_NONE: return "R_ARM_NONE"; case R_ARM_ABS32: return "R_ARM_ABS32";
+        case R_ARM_NONE: return "R_ARM_NONE";   case R_ARM_ABS32: return "R_ARM_ABS32";
         case R_ARM_REL32: return "R_ARM_REL32"; case R_ARM_CALL: return "R_ARM_CALL";
         case R_ARM_GLOB_DAT: return "R_ARM_GLOB_DAT"; case R_ARM_JUMP_SLOT: return "R_ARM_JUMP_SLOT"; 
         case R_ARM_RELATIVE: return "R_ARM_RELATIVE"; case R_ARM_COPY: return "R_ARM_COPY"; 
@@ -1122,36 +1139,4 @@ void elf_dump(const elf_t *e) {
     print_all_relocs(e);
     print_dynamic(e);
     print_notes(e);
-}
-
-static void usage(const char *prog) {
-    fprintf(stderr, "usage: %s [-q] <elf-file>\n", prog);
-    fprintf(stderr, "  -q  quiet mode (summary only)\n");
-}
-
-int main(int argc, char **argv) {
-    int quiet = 0, opt;
-    while ((opt = getopt(argc, argv, "qh")) != -1) {
-        switch (opt) {
-            case 'q': quiet = 1; break;
-            default: usage(argv[0]); return (opt == 'h') ? 0 : 1;
-        }
-    }
-    if (optind >= argc) { usage(argv[0]); return 1; }
-
-    elf_t elf;
-    int err = elf_open(&elf, argv[optind]);
-    if (err != E_OK) { fprintf(stderr, "error: %s\n", elf.errmsg); return 1; }
-
-    if (quiet) {
-        printf("File: %s\nType: %s\nMachine: %s\nEntry: 0x%lx\n",
-               argv[optind], elf_type_str(elf.elf_type),
-               elf_machine_str(elf.elf_machine), (unsigned long)elf_entry(&elf));
-        printf("Sections: %u, Symbols: %u + %u\n",
-               elf.shnum, elf.symtab_count, elf.dynsym_count);
-    } else {
-        elf_dump(&elf);
-    }
-    elf_close(&elf);
-    return 0;
 }

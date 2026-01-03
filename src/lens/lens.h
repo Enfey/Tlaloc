@@ -51,6 +51,8 @@ enum {
     E_NO_SYMBOL,
 };
 
+typedef struct elf elf_t;
+
 /* ARM32 flag helpers */
 static inline uint32_t arm_eabi_ver(uint32_t f)   { return (f & EF_ARM_EABIMASK) >> 24; }
 static inline bool     arm_be8(uint32_t f)        { return (f & EF_ARM_BE8) != 0; }
@@ -69,7 +71,7 @@ static inline bool     arm_soft_float(uint32_t f) { return (f & EF_ARM_ABI_FLOAT
  * Union discriminated by elf_class; only e32 OR e64 is valid.
  * INVARIANT: All pointers become invalid after elf_close().
  */
-typedef struct {
+struct elf {
     void       *base;
     size_t      size;
     const char *path;
@@ -113,7 +115,7 @@ typedef struct {
 
     int         last_err;
     char        errmsg[128];
-} elf_t;
+};
 
 #define ELF_IS_32(e)      ((e)->elf_class == ELFCLASS32)
 #define ELF_IS_64(e)      ((e)->elf_class == ELFCLASS64)
@@ -122,6 +124,7 @@ typedef struct {
 
 /* Lifecycle */
 int  elf_open(elf_t *e, const char *path);
+int  elf_open_mem(elf_t *e, const void *data, size_t size);
 void elf_close(elf_t *e);
 
 /* Header accessors */
