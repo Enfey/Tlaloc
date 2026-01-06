@@ -65,7 +65,7 @@ struct meld_ctx {
 
     uint32_t         current_group_id;  /* Group semantics - See archive.h */
 
-    struct meld_gst *gst;               /* GST - TODO!*/
+    struct meld_gst *gst;               /* GST - see meld_symbol.h */
 
     /* Library search paths (-L) */
     char           **lib_paths;
