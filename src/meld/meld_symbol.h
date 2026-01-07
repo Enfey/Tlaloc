@@ -54,15 +54,15 @@ struct meld_symbol {
     uint32_t          st_size;
 
     uint8_t           state;          /* meld_sym_state_t */
-    uint16_t          version_ndx;    /* Version index for .gnu.version - see output.h */
+    uint16_t          version_ndx;    /* Version index for .gnu.version - TODO*/
 
     /* -1/0 = no entry */
     int32_t           got_offset;
     int32_t           plt_offset;
-    uint32_t          veneer_addr;
+    uint32_t          veneer_addr;    /* Incredibly speculative - TODO */
     uint32_t          dynsym_idx;     /* Index in .dynsym (0 = not in dynsym) */
 
-    meld_input_t     *input;          /* Defining input file - TODO */
+    meld_input_t     *input;          /* Defining input file */
 
     meld_archive_t   *archive;        /* Archive containing this symbol */
     uint32_t          ar_member_off;  /* Offset of member in archive */
