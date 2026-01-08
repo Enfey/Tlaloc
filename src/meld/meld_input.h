@@ -15,7 +15,7 @@
 
 /* Per-section linker state providing only what lens doesn't provide */
 typedef struct meld_sec_state {
-    struct meld_osec *out;              /* Output section this coalesces into - partially implemented to support input_update_symbol_values */
+    struct meld_osec *out;              /* Output section this coalesces into */
     uint32_t output_offset;             /* Offset within that output section */
 } meld_sec_state_t;
 
