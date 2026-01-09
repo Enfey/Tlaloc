@@ -39,7 +39,7 @@ struct meld_input {
     uint32_t         local_count;
     uint32_t         local_cap;
 
-    meld_reloc_t     *relocs;           /* TODO */
+    meld_reloc_t     *relocs;
     uint32_t         reloc_count;
     uint32_t         reloc_cap;
 
