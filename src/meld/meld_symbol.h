@@ -59,7 +59,7 @@ struct meld_symbol {
     /* -1/0 = no entry */
     int32_t           got_offset;
     int32_t           plt_offset;
-    uint32_t          veneer_addr;    /* Incredibly speculative - TODO */
+    uint32_t          veneer_addr;    /* Incredibly speculative */
     uint32_t          dynsym_idx;     /* Index in .dynsym (0 = not in dynsym) */
 
     meld_input_t     *input;          /* Defining input file */
