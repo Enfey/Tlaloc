@@ -1,6 +1,6 @@
 /* meld_output.h - ELF symbol table and hash generation
  *
- * Handling of emission of sections which the static linker is responsible for construction:
+ * Handles emission of sections which the static linker is responsible for construction:
  *     .symtab / .strtab
  *     .dynsym / .dynstr
  *     .gnu.hash
@@ -64,5 +64,40 @@ int32_t     got_lookup(meld_got_t *got, meld_symbol_t *sym);
 int         got_layout(meld_got_t *got, uint32_t got_addr, uint32_t gotplt_addr);
 size_t      got_size(const meld_got_t *got);
 size_t      got_write(const meld_got_t *got, void *buf, size_t len);
+
+/* .strtab
+ * Concatenated NUL-terminated strings. The first byte, index 0, holds NUL terminator, and so does the last.
+ */
+typedef struct {
+    char    *data;
+    size_t   size;
+    size_t   cap;
+} meld_strtab_t;
+
+int      strtab_init(meld_strtab_t *st);
+void     strtab_destroy(meld_strtab_t *st);
+uint32_t strtab_add(meld_strtab_t *st, const char *s);
+
+static inline const char *strtab_data(const meld_strtab_t *st) { return st ? st->data : NULL; }
+static inline size_t strtab_size(const meld_strtab_t *st) { return st ? st->size : 0; }
+
+/* .symtab
+ *   [0]       STN_UNDEF.
+ *   sh_info = N (first non-local index)
+ *
+ * .dynsym: same structure, filtered for exportable symbols only, that is: STV_DEFAULT, relevant runtime type, STB_GLOAL || STB_WEAK.
+ */
+typedef struct {
+    Elf32_Sym      *syms;
+    uint32_t        count;
+    uint32_t        cap;
+    uint32_t        first_global;   /* sh_info value (though i think i've decided this will just be 1, not propagating locals). */
+    meld_strtab_t   strtab;
+} meld_symtab_t;
+
+int      symtab_init(meld_symtab_t *st);
+void     symtab_destroy(meld_symtab_t *st);
+uint32_t symtab_add(meld_symtab_t *st, const meld_symbol_t *sym);
+void     symtab_end_locals(meld_symtab_t *st);
 
 #endif /* MELD_OUTPUT_H */
