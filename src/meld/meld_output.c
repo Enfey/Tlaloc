@@ -747,3 +747,486 @@ int version_script_load(meld_ctx_t *ctx, meld_version_t *ver, const char *path) 
     free(buf);
     return rc;
 }
+
+int got_init(meld_got_t *got) {
+    if (!got) return MELD_ERR_INTERNAL;
+    memset(got, 0, sizeof(*got));
+    return MELD_OK;
+}
+
+void got_destroy(meld_got_t *got) {
+    if (!got) return;
+
+    meld_got_entry_t *e = got->entries;
+    while (e) {
+        meld_got_entry_t *next = e->next;
+        free(e);
+        e = next;
+    }
+
+    memset(got, 0, sizeof(*got));
+}
+
+uint32_t got_add(meld_got_t *got, meld_symbol_t *sym, bool is_plt) {
+    if (!got || !sym) return MELD_ERR_INTERNAL;
+
+    for (meld_got_entry_t *e = got->entries; e; e = e->next) {
+        if (e->sym == sym) return MELD_OK;  /* Already has entry */
+    }
+
+    meld_got_entry_t *e = calloc(1, sizeof(*e));
+    if (!e) return MELD_ERR_NOMEM;
+
+    e->sym = sym;
+    e->is_plt = is_plt;
+
+    if (got->tail) {
+        got->tail->next = e;
+    } else {
+        got->entries = e;
+    }
+    got->tail = e;
+    got->count++;
+
+    return MELD_OK;
+}
+
+/* Returns offset of the symbol's GOT entry from GOT base
+ * Useful for relocs like R_ARM_BREL; GOT(S) + A – GOT_ORG
+ */
+int32_t got_lookup(meld_got_t *got, meld_symbol_t *sym) {
+    if (!got || !sym) return -1;
+    return sym->got_offset;  /* Already -1 if no GOT entry */
+}
+
+int got_layout(meld_got_t *got, uint32_t got_addr, uint32_t gotplt_addr) {
+    if (!got) return MELD_ERR_INTERNAL;
+
+    got->got_addr = got_addr;
+    got->gotplt_addr = gotplt_addr;
+
+    uint32_t got_entries = 0;
+    uint32_t gotplt_entries = 3;  /* Reserved: _DYNAMIC, link_map, resolver stub */
+
+    for (meld_got_entry_t *e = got->entries; e; e = e->next) {
+        if (e->is_plt) {
+            e->got_offset = gotplt_entries * 4;
+            gotplt_entries++;
+        } else {
+            e->got_offset = got_entries * 4;
+            got_entries++;
+        }
+        if (e->sym) {
+            e->sym->got_offset = (int32_t)e->got_offset;
+        }
+    }
+
+    got->got_size = got_entries * 4;
+    got->gotplt_size = gotplt_entries * 4;
+
+    return MELD_OK;
+}
+
+size_t got_size(const meld_got_t *got) {
+    return got ? got->got_size : 0;
+}
+
+size_t got_write(const meld_got_t *got, void *buf, size_t len) {
+    if (!got || !buf) return 0;
+    if (len < got->got_size) return 0;  /* Maybe placing too much pressure on caller? */
+
+    uint32_t *data = (uint32_t *)buf;
+    memset(data, 0, got->got_size);
+
+    /* Static linking, maybe add support for fixing up dynamic ones here if it doesn't fit anywhere else better */
+    for (meld_got_entry_t *e = got->entries; e; e = e->next) {
+        if (!e->is_plt && e->sym) {
+            data[e->got_offset / 4] = e->sym->st_value;  /* Yield index and write final address into GOT slot */
+        }
+    }
+
+    return got->got_size;
+}
+
+int plt_init(meld_plt_t *plt) {
+    if (!plt) return MELD_ERR_INTERNAL;
+    memset(plt, 0, sizeof(*plt));
+    return MELD_OK;
+}
+
+void plt_destroy(meld_plt_t *plt) {
+    if (!plt) return;
+
+    meld_plt_entry_t *e = plt->entries;
+    while (e) {
+        meld_plt_entry_t *next = e->next;
+        free(e);
+        e = next;
+    }
+
+    memset(plt, 0, sizeof(*plt));
+}
+
+/* Duplicates handled at callsite */
+uint32_t plt_add(meld_plt_t *plt, meld_symbol_t *sym, meld_got_t *got) {
+    if (!plt || !sym) return 0;
+
+    meld_plt_entry_t *e = calloc(1, sizeof(*e));
+    if (!e) return 0;
+
+    e->sym = sym;
+    e->plt_offset = ARM_PLT0_SIZE + (plt->count * ARM_PLTN_SIZE);
+
+    sym->plt_offset = (int32_t)e->plt_offset;
+
+    /* Add corresponding .got.plt entry if doesn't already exist */
+    if (got) {
+        got_add(got, sym, true);
+    }
+
+    if (plt->tail) {
+        plt->tail->next = e;
+    } else {
+        plt->entries = e;
+    }
+    plt->tail = e;
+    plt->count++;
+
+    return plt->plt_addr + e->plt_offset;
+}
+
+int plt_layout(meld_plt_t *plt, uint32_t plt_addr) {
+    if (!plt) return MELD_ERR_INTERNAL;
+    plt->plt_addr = plt_addr;
+    plt->plt_size = ARM_PLT0_SIZE + (plt->count * ARM_PLTN_SIZE);
+    return MELD_OK;
+}
+
+size_t plt_size(const meld_plt_t *plt) {
+    return plt ? plt->plt_size : 0;
+}
+
+size_t plt_write(const meld_plt_t *plt, const meld_got_t *got, void *buf, size_t len) {
+    if (!plt || !buf || !got) return 0;
+    if (len < plt->plt_size) return 0;
+
+    uint32_t *code = (uint32_t *)buf;
+
+    /* PLT[0]: Lazy binding resolver stub
+     * Reference: https://sourceware.org/git/?p=binutils-gdb.git;a=blob;f=bfd/elf32-arm.c#l2409
+     *
+     * Note: musl uses eager binding by default, so PLT[0] is rarely executed (should hopefully get round to testing this)
+     */
+    code[0] = 0xE52DE004;  /* STR LR, [SP, #-4]!   ; Push return address            */
+    code[1] = 0xE59FE004;  /* LDR LR, [PC, #4]     ; LR = literal offset            */
+    code[2] = 0xE08FE00E;  /* ADD LR, PC, LR       ; LR = &.got.plt[0]              */
+    code[3] = 0xE5BEF008;  /* LDR PC, [LR, #8]!    ; PC = .got.plt[2], LR += 8      */
+
+    
+    int32_t plt0_offset = (int32_t)got->gotplt_addr - (int32_t)(plt->plt_addr + 16);
+    code[4] = (uint32_t)plt0_offset;
+
+    /* PLT[n]:
+     *
+     * Fast !
+     *     +0:  LDR IP, [PC, #12]     ; IP = offset
+     *     +4:  ADD IP, PC, IP        ; IP = &.got.plt[n]
+     *     +8:  LDR PC, [IP]          ; PC = *.got.plt[n] (resolved address)
+     *
+     * Lazy stub (.got.plt[n] initially points to here):
+     *     +12: PUSH {LR}             ; Save return address
+     *     +16: B PLT[0]              ; Jump to resolver (IP still = &.got.plt[n])
+     *
+     * Literal pool:
+     *     +20: .word offset          ; PC-relative offset to .got.plt[n]
+     *
+     * First call: .got.plt[n] contains PLT[n]+12, so LDR PC,[IP] lands at +12.
+     * Resolver uses IP (= &.got.plt[n]) to find R_ARM_JUMP_SLOT, resolves symbol,
+     * patches .got.plt[n] with actual address. Subsequent calls jump directly.
+     */
+    uint32_t idx = 5;  /* Start after PLT[0]'s 5 words */
+    for (meld_plt_entry_t *e = plt->entries; e; e = e->next) {
+        /* GOT slot address set by got_layout() */
+        uint32_t got_slot_addr = got->gotplt_addr + (uint32_t)e->sym->got_offset;
+        uint32_t plt_entry_addr = plt->plt_addr + e->plt_offset;
+        int32_t offset = (int32_t)got_slot_addr - (int32_t)(plt_entry_addr + 12);
+        
+        /* Branch offset for B PLT[0]: at B (+16), PC = plt_entry_addr + 24 */
+        int32_t b_offset = ((int32_t)plt->plt_addr - (int32_t)(plt_entry_addr + 24)) >> 2;
+        
+        code[idx++] = 0xE59FC00C;  /* LDR IP, [PC, #12]  ; Load offset from +20      */
+        code[idx++] = 0xE08FC00C;  /* ADD IP, PC, IP     ; IP = &.got.plt[n]         */
+        code[idx++] = 0xE59CF000;  /* LDR PC, [IP]       ; Jump through GOT          */
+        code[idx++] = 0xE52DE004;  /* PUSH {LR}          ; Save return addr          */
+        code[idx++] = 0xEA000000 | (b_offset & 0x00FFFFFF);  /* B PLT[0]             */
+        code[idx++] = (uint32_t)offset;  /* Literal: offset to GOT slot              */
+    }
+
+    return plt->plt_size;
+}
+
+int dynrel_init(meld_dynrel_mgr_t *mgr) {
+    if (!mgr) return MELD_ERR_INTERNAL;
+    memset(mgr, 0, sizeof(*mgr));
+    return MELD_OK;
+}
+
+void dynrel_destroy(meld_dynrel_mgr_t *mgr) {
+    if (!mgr) return;
+
+    meld_dynrel_t *r = mgr->rel_dyn;
+    while (r) {
+        meld_dynrel_t *next = r->next;
+        free(r);
+        r = next;
+    }
+
+    r = mgr->rel_plt;
+    while (r) {
+        meld_dynrel_t *next = r->next;
+        free(r);
+        r = next;
+    }
+
+    memset(mgr, 0, sizeof(*mgr));
+}
+
+int dynrel_add_dyn(meld_dynrel_mgr_t *mgr, uint32_t offset, uint32_t type, uint32_t sym_idx) {
+    if (!mgr) return MELD_ERR_INTERNAL;
+
+    meld_dynrel_t *r = calloc(1, sizeof(*r));
+    if (!r) return MELD_ERR_NOMEM;
+
+    r->r_offset = offset;
+    r->r_type = type;
+    r->sym_idx = sym_idx;
+
+    if (mgr->rel_dyn_tail) {
+        mgr->rel_dyn_tail->next = r;
+    } else {
+        mgr->rel_dyn = r;
+    }
+    mgr->rel_dyn_tail = r;
+    mgr->rel_dyn_count++;
+
+    return MELD_OK;
+}
+
+int dynrel_add_plt(meld_dynrel_mgr_t *mgr, uint32_t offset, uint32_t sym_idx) {
+    if (!mgr) return MELD_ERR_INTERNAL;
+
+    meld_dynrel_t *r = calloc(1, sizeof(*r));
+    if (!r) return MELD_ERR_NOMEM;
+
+    r->r_offset = offset;
+    r->r_type = R_ARM_JUMP_SLOT;
+    r->sym_idx = sym_idx;
+
+    if (mgr->rel_plt_tail) {
+        mgr->rel_plt_tail->next = r;
+    } else {
+        mgr->rel_plt = r;
+    }
+    mgr->rel_plt_tail = r;
+    mgr->rel_plt_count++;
+
+    return MELD_OK;
+}
+
+size_t dynrel_dyn_size(const meld_dynrel_mgr_t *mgr) {
+    return mgr ? mgr->rel_dyn_count * sizeof(Elf32_Rel) : 0;
+}
+
+size_t dynrel_plt_size(const meld_dynrel_mgr_t *mgr) {
+    return mgr ? mgr->rel_plt_count * sizeof(Elf32_Rel) : 0;
+}
+
+size_t dynrel_dyn_write(const meld_dynrel_mgr_t *mgr, void *buf, size_t len) {
+    if (!mgr || !buf) return 0;
+
+    size_t need = dynrel_dyn_size(mgr);
+    if (len < need) return 0;
+
+    Elf32_Rel *rels = (Elf32_Rel *)buf;
+    uint32_t i = 0;
+
+    for (meld_dynrel_t *r = mgr->rel_dyn; r; r = r->next) {
+        rels[i].r_offset = r->r_offset;
+        rels[i].r_info = ELF32_R_INFO(r->sym_idx, r->r_type);
+        i++;
+    }
+
+    return need;
+}
+
+size_t dynrel_plt_write(const meld_dynrel_mgr_t *mgr, void *buf, size_t len) {
+    if (!mgr || !buf) return 0;
+
+    size_t need = dynrel_plt_size(mgr);
+    if (len < need) return 0;
+
+    Elf32_Rel *rels = (Elf32_Rel *)buf;
+    uint32_t i = 0;
+
+    for (meld_dynrel_t *r = mgr->rel_plt; r; r = r->next) {
+        rels[i].r_offset = r->r_offset;
+        rels[i].r_info = ELF32_R_INFO(r->sym_idx, r->r_type);
+        i++;
+    }
+
+    return need;
+}
+
+int meld_output_ext_init(meld_output_ext_t *out) {
+    if (!out) return MELD_ERR_INTERNAL;
+
+    memset(out, 0, sizeof(*out));
+
+    int rc;
+    if ((rc = symtab_init(&out->symtab)) != MELD_OK) return rc;
+    if ((rc = symtab_init(&out->dynsym)) != MELD_OK) return rc;
+    if ((rc = gnu_hash_init(&out->gnu_hash)) != MELD_OK) return rc;
+    if ((rc = version_init(&out->version)) != MELD_OK) return rc;
+    if ((rc = got_init(&out->got)) != MELD_OK) return rc;
+    if ((rc = plt_init(&out->plt)) != MELD_OK) return rc;
+    if ((rc = dynrel_init(&out->dynrels)) != MELD_OK) return rc;
+
+    return MELD_OK;
+}
+
+void meld_output_ext_destroy(meld_output_ext_t *out) {
+    if (!out) return;
+
+    symtab_destroy(&out->symtab);
+    symtab_destroy(&out->dynsym);
+    gnu_hash_destroy(&out->gnu_hash);
+    version_destroy(&out->version);
+    got_destroy(&out->got);
+    plt_destroy(&out->plt);
+    dynrel_destroy(&out->dynrels);
+
+    memset(out, 0, sizeof(*out));
+}
+
+/* Determines which symbols are exported to .dynsym
+
+ * Interesting article/reference: https://maskray.me/blog/2021-05-16-elf-interposition-and-bsymbolic
+ *   STV_DEFAULT   - fully exported, interposable
+ *   STV_PROTECTED - exported but not interposable
+ *   STV_HIDDEN    - not exported to .dynsym
+ *   STV_INTERNAL  - processor-reserved, treat as hidden
+ */
+static bool sym_is_dynamic(const meld_symbol_t *sym) {
+    if (!sym) return false;
+    uint8_t bind = sym_bind(sym);
+    if (bind != STB_GLOBAL && bind != STB_WEAK) return false;
+    if (sym_is_local_binding(sym)) return false;
+    return sym->state == SYM_DEFINED || sym->state == SYM_UNDEFINED || sym->state == SYM_SHARED;
+}
+
+static int add_global(meld_symbol_t *sym, void *user) {
+    if (!sym_is_local(sym)) symtab_add(user, sym);
+    return 0;
+}
+
+static int add_dynamic(meld_symbol_t *sym, void *user) {
+    if (!sym_is_dynamic(sym)) return 0;
+    symtab_add(user, sym);
+    return 0;
+}
+
+int meld_output_ext_build(meld_ctx_t *ctx, meld_output_ext_t *out, bool dynamic) {
+    if (!ctx || !out || !ctx->gst) return MELD_ERR_INTERNAL;
+
+    /* Build .symtab: locals first (from each input), then globals (from GST)
+     * 
+     * STB_LOCAL stored per-input in inp->locals[] because they don't participate in cross-file resolution(unsurprisingly).
+     * We must iterate each input to collect them for the output .symtab.
+     */
+    for (uint32_t i = 0; i < ctx->input_count; i++) {
+        meld_input_t *inp = ctx->inputs[i];
+        for (uint32_t j = 0; j < inp->local_count; j++) {
+            symtab_add(&out->symtab, inp->locals[j]);
+        }
+    }
+    symtab_end_locals(&out->symtab);
+    
+    /* Add globals/weak from GST */
+    gst_iterate(ctx->gst, add_global, &out->symtab);
+
+    if (!dynamic) return MELD_OK;
+
+    /* Build .dynsym (names go into embedded .dynstr via strtab_add) */
+    int rc = gst_iterate(ctx->gst, add_dynamic, &out->dynsym);
+    if (rc != MELD_OK) return rc;
+
+    /* Build .gnu.hash, reordering .dynsym symbols by bucket for cache locality */
+    rc = gnu_hash_build(&out->dynsym, 1, &out->gnu_hash);
+    if (rc != MELD_OK) return rc;
+
+    /* Allocate .gnu.version */
+    rc = version_alloc_versym(&out->version, out->dynsym.count);
+    if (rc != MELD_OK) return rc;
+
+    /* Populate .gnu.version from symbol version_ndx.
+     * After gnu_hash_build reorders .dynsym, look up each symbol by name
+     * in the GST to retrieve corresponding version_ndx. .dynstr offsets survive
+     * reordering since the string table itself hasn't been modified.
+     * We store dynsym_idx on the symbol for relocation generation
+     */
+    for (uint32_t i = 1; i < out->dynsym.count; i++) {
+        const char *name = out->dynsym.strtab.data + out->dynsym.syms[i].st_name;
+        meld_symbol_t *sym = gst_lookup(ctx->gst, name);
+        if (sym) {
+            sym->dynsym_idx = i;
+            if (sym->version_ndx >= 2) {
+                version_set_sym(&out->version, i, sym->version_ndx);
+            }
+        }
+        /* Otherwise keeps default VER_NDX_GLOBAL from version_alloc_versym */
+    }
+
+    return MELD_OK;
+}
+
+void meld_output_ext_update_symtab_values(meld_ctx_t *ctx, meld_output_ext_t *out) {
+    if (!ctx || !out) return;
+
+    /* Update symtab entries with final symbol addresses.
+     * Will be called after input_update_symbol_values().
+     */
+    uint32_t idx = 1;
+
+    /* Locals; same order as meld_output_ext_build to update naturally */
+    for (uint32_t i = 0; i < ctx->input_count; i++) {
+        meld_input_t *inp = ctx->inputs[i];
+        for (uint32_t j = 0; j < inp->local_count; j++) {
+            if (idx < out->symtab.count) {
+                out->symtab.syms[idx].st_value = inp->locals[j]->st_value;
+            }
+            idx++;
+        }
+    }
+
+    if (ctx->gst) {
+        for (uint32_t b = 0; b < ctx->gst->bucket_count; b++) {
+            for (meld_symbol_t *sym = ctx->gst->buckets[b]; sym; sym = sym->next) {
+                if (!sym_is_local(sym) && idx < out->symtab.count) {
+                    out->symtab.syms[idx].st_value = sym->st_value;
+                    idx++;
+                }
+            }
+        }
+    }
+}
+
+void meld_output_ext_update_dynsym_values(meld_ctx_t *ctx, meld_output_ext_t *out) {
+    if (!ctx || !out || !ctx->gst) return;
+    for (uint32_t i = 1; i < out->dynsym.count; i++) {
+        const char *name = out->dynsym.strtab.data + out->dynsym.syms[i].st_name;
+        meld_symbol_t *sym = gst_lookup(ctx->gst, name);
+        if (sym) {
+            out->dynsym.syms[i].st_value = sym->st_value;
+        }
+    }
+}

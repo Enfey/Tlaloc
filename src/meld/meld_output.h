@@ -247,4 +247,83 @@ size_t version_verneed_write(const meld_version_t *v, void *buf, size_t len);
 int version_script_load(meld_ctx_t *ctx, meld_version_t *v, const char *path);
 int version_script_parse(meld_ctx_t *ctx, meld_version_t *v, const char *script);
 
+#define ARM_PLT0_SIZE    20
+#define ARM_PLTN_SIZE    24
+
+typedef struct meld_plt_entry {
+    meld_symbol_t       *sym;           /* Symbol (STT_FUNC) stub calls */
+    uint32_t             plt_offset;    /* Offset within .plt section  */
+    struct meld_plt_entry *next;
+} meld_plt_entry_t;
+
+typedef struct {
+    meld_plt_entry_t    *entries;
+    meld_plt_entry_t    *tail;
+    uint32_t             count;
+
+    uint32_t             plt_addr;
+    uint32_t             plt_size;
+} meld_plt_t;
+
+int       plt_init(meld_plt_t *plt);
+void      plt_destroy(meld_plt_t *plt);
+uint32_t  plt_add(meld_plt_t *plt, meld_symbol_t *sym, meld_got_t *got);
+int       plt_layout(meld_plt_t *plt, uint32_t plt_addr);
+size_t    plt_size(const meld_plt_t *plt);
+size_t    plt_write(const meld_plt_t *plt, const meld_got_t *got, void *buf, size_t len);
+
+/* .rel.dyn:  Data relocations (R_ARM_RELATIVE, R_ARM_GLOB_DAT, R_ARM_ABS32 etc)
+ * .rel.plt:  Function relocations for lazy binding (R_ARM_JUMP_SLOT etc)
+ * .rel.got:  GOT entry relocations (we're merging into .rel.dyn)
+ */
+typedef struct meld_dynrel {
+    uint32_t    r_offset;
+    uint32_t    r_type;
+    uint32_t    sym_idx;
+    int32_t     r_addend;
+    struct meld_dynrel *next;
+} meld_dynrel_t;
+
+typedef struct {
+    meld_dynrel_t  *rel_dyn;
+    meld_dynrel_t  *rel_dyn_tail;
+    uint32_t        rel_dyn_count;
+
+    meld_dynrel_t  *rel_plt;
+    meld_dynrel_t  *rel_plt_tail;
+    uint32_t        rel_plt_count;
+} meld_dynrel_mgr_t;
+
+int    dynrel_init(meld_dynrel_mgr_t *mgr);
+void   dynrel_destroy(meld_dynrel_mgr_t *mgr);
+int    dynrel_add_dyn(meld_dynrel_mgr_t *mgr, uint32_t offset, uint32_t type, uint32_t sym_idx);
+int    dynrel_add_plt(meld_dynrel_mgr_t *mgr, uint32_t offset, uint32_t sym_idx);
+size_t dynrel_dyn_size(const meld_dynrel_mgr_t *mgr);
+size_t dynrel_plt_size(const meld_dynrel_mgr_t *mgr);
+size_t dynrel_dyn_write(const meld_dynrel_mgr_t *mgr, void *buf, size_t len);
+size_t dynrel_plt_write(const meld_dynrel_mgr_t *mgr, void *buf, size_t len);
+
+typedef struct meld_output_ext {
+    meld_symtab_t       symtab;     /* .symtab + .strtab */
+    meld_symtab_t       dynsym;     /* .dynsym + .dynstr */
+    meld_gnu_hash_t     gnu_hash;   /* .gnu.hash */
+    meld_version_t      version;    /* .gnu.version etc */
+
+    meld_got_t          got;        /* .got / .got.plt */
+    meld_plt_t          plt;        /* .plt */
+    meld_dynrel_mgr_t   dynrels;    /* .rel.dyn / .rel.plt / rel.got (merged into rel.dyn) */
+} meld_output_ext_t;
+
+int  meld_output_ext_init(meld_output_ext_t *out);
+void meld_output_ext_destroy(meld_output_ext_t *out);
+
+/* Build symbol tables from GST. If dynamic=true, also builds .dynsym/.gnu.hash etc */
+int meld_output_ext_build(meld_ctx_t *ctx, meld_output_ext_t *out, bool dynamic);
+
+/* Update symtab st_value entries after symbol addresses are finalised */
+void meld_output_ext_update_symtab_values(meld_ctx_t *ctx, meld_output_ext_t *out);
+
+/* Same as above */
+void meld_output_ext_update_dynsym_values(meld_ctx_t *ctx, meld_output_ext_t *out);
+
 #endif /* MELD_OUTPUT_H */
