@@ -142,12 +142,6 @@ jobs:
             --suppress=constParameterPointer \
             src/
 
-      - name: Clang-format
-        uses: wearerequired/lint-action@v2
-        with:
-          clang_format: true
-          clang_format_extensions: "c,h"
-
       - name: Run clang static analyser
         run: |
           scan-build cmake -B build-scan -G "Unix Makefiles"

@@ -22,9 +22,8 @@ ELF interrogation and manipulation utilities for GNU/Linux.
 
 COMPONENTS
     lens      - 'fast' mmap-based ELF parser for ARM32/ARM64
-    soul      - self-erasing userspace loader
-    meld      - static linker for ARM32
-    glue      - TBD
+    soul      - self-erasing userspace loader (not implemented unfortunately -  though was mapped out in good detail)
+    meld      - static linker for ARM32 (targeting ARMv7v-a specifically based on the datasheet and ELF spec)
 
 BUILD
     One can build themselves, or use .scripts/build-native.sh for native development.
@@ -72,11 +71,6 @@ TESTS
     Show failed test output:
         ctest --output-on-failure
 
-    Test naming: <arch><bits>-<test_name>
-        arm32-et_exec       Parse ET_EXEC executable
-        arm32-et_dyn        Parse ET_DYN shared object
-        arm32-thumb         ARM32-specific THUMB test
-
 QEMU
     qemu-arm -L /usr/arm-linux-gnueabi build-arm32/bin/<component> <args>
     qemu-aarch64 -L /usr/aarch64-linux-gnu build-arm64/bin/<component> <args>
@@ -91,6 +85,5 @@ CI
     - Native build + ASan/UBSan
     - ARM32/ARM64 cross-compilation
     - cppcheck
-    - clang-format check
     - Test suite execution
 (c) 2025 Felix Riley-Kay

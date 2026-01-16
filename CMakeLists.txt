@@ -17,7 +17,6 @@ endif()
 add_subdirectory(src/lens)
 add_subdirectory(src/soul)
 add_subdirectory(src/meld)
-add_subdirectory(src/glue)
 
 enable_testing()
 add_subdirectory(tests)
