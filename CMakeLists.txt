@@ -9,7 +9,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 add_compile_options(-Wall -Wextra -Wnull-dereference -Wwrite-strings)
 
 # Sanitisers for debug builds
-if(NOT CMAKE_CROSSCOMPILING)
+if(NOT CMAKE_CROSSCOMPILING AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-fsanitize=undefined,address -fno-omit-frame-pointer)
     add_link_options(-fsanitize=undefined,address)
 endif()

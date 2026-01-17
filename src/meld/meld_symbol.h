@@ -54,7 +54,7 @@ struct meld_symbol {
     uint32_t          st_size;
 
     uint8_t           state;          /* meld_sym_state_t */
-    uint16_t          version_ndx;    /* Version index for .gnu.version - TODO*/
+    uint16_t          version_ndx;    /* Version index for .gnu.version */
 
     /* -1/0 = no entry */
     int32_t           got_offset;

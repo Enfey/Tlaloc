@@ -52,10 +52,7 @@ DOCKER
     container, so builds persist after the container exits. --rm
     removes the container after it stops.
 
-    The container includes:
-        - GCC cross-compilers for ARM32/ARM64
-        - QEMU user-mode emulation
-        - clang-format, cppcheck, valgrind, gdb-multiarch
+    
 TESTS
     Tests use CMake's ctest. They auto-detect cross-compilers and QEMU.
 
@@ -71,15 +68,25 @@ TESTS
     Show failed test output:
         ctest --output-on-failure
 
+DOCKER TESTING
+    Build and run all tests in container:
+        docker build -t tlaloc-dev .
+        docker run --rm -v $(pwd):/workspace tlaloc-dev bash -c \
+            "cmake -B build-docker -G Ninja -DCMAKE_BUILD_TYPE=Release && \
+             ninja -C build-docker && \
+             ctest --test-dir build-docker -j$(nproc)"
+
+    Run component tests only:
+        docker run --rm -v $(pwd):/workspace tlaloc-dev bash -c \
+            "cmake -B build-docker -G Ninja -DCMAKE_BUILD_TYPE=Release && \
+             ninja -C build-docker <comp> && \
+             ctest --test-dir build-docker -R <comp> -V"
+
+    Use Release mode in Docker; ASan clashes with QEMU
+
 QEMU
     qemu-arm -L /usr/arm-linux-gnueabi build-arm32/bin/<component> <args>
     qemu-aarch64 -L /usr/aarch64-linux-gnu build-arm64/bin/<component> <args>
-
-CODE STYLE
-    See .clang-format
-    
-    Format:  find src -name '*.[ch]' | xargs clang-format -i
-    Check:   find src -name '*.[ch]' | xargs clang-format --dry-run --Werror
 
 CI
     - Native build + ASan/UBSan

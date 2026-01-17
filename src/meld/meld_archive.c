@@ -409,10 +409,12 @@ int archive_resolve_lazy(meld_ctx_t *ctx) {
         meld_archive_t *ar = ctx->archives[i];
 
         if (ar->group_id == 0) {
-            /* No group therefore L-R singular pass */
+            /* No group - iterate single archive until fixpoint */
             uint32_t extracted;
-            int rc = search_archive_range(ctx, i, i + 1, &extracted);
-            if (rc != MELD_OK) return rc;
+            do {
+                int rc = search_archive_range(ctx, i, i + 1, &extracted);
+                if (rc != MELD_OK) return rc;
+            } while (extracted > 0);
             i++;
         } else {
             /* Grouped archives: find extent of this group */

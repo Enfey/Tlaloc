@@ -64,7 +64,7 @@ typedef struct meld_phdr {
  */
 typedef struct meld_layout {
     meld_section_mgr_t  *sections;
-    meld_dynlink_t      *dynlink;  /* TODO */
+    meld_dynlink_t      *dynlink;
 
     meld_phdr_t         *phdrs;
     meld_phdr_t         *phdrs_tail;

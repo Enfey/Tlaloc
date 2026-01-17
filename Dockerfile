@@ -1,17 +1,12 @@
 # Tlaloc Development Container
-# Multi-architecture build env for ARM32/ARM64 cross-compilation
+# Multi-arch build env
 #
 # Build:
-#   docker build -t tlaloc-dev .
+#     docker build -t tlaloc-dev .
 #
 # Run interactive shell:
-#   docker run -it --rm -v $(pwd):/workspace tlaloc-dev
+#     docker run -it --rm -v $(pwd):/workspace tlaloc-dev
 #
-# Build ARM32:
-#   docker run --rm -v $(pwd):/workspace tlaloc-dev ./scripts/build-arm32.sh
-#
-# Build ARM64:
-#   docker run --rm -v $(pwd):/workspace tlaloc-dev ./scripts/build-arm64.sh
 
 FROM debian:bookworm-slim
 
@@ -31,8 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc-aarch64-linux-gnu \
     g++-aarch64-linux-gnu \
     libc6-dev-arm64-cross \
-    qemu-user-static \
-    cppcheck \
+    qemu-user \
     clang-format \
     valgrind \
     gdb-multiarch \
@@ -40,9 +34,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     binutils \
     binutils-arm-linux-gnueabi \
     binutils-aarch64-linux-gnu \
+    curl \
+    ca-certificates \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+ENV MUSL_VERSION=arm-linux-musleabi-cross
+ENV MUSL_URL=https://musl.cc/${MUSL_VERSION}.tgz
+ENV MUSL_SYSROOT=/opt/musl-arm
+
+RUN curl -fsSL ${MUSL_URL} | tar -xz -C /opt \
+    && mv /opt/${MUSL_VERSION} ${MUSL_SYSROOT} \
+    && ln -s ${MUSL_SYSROOT}/bin/* /usr/local/bin/ \
+    && rm -f ${MUSL_SYSROOT}/arm-linux-musleabi/lib/ld-musl-arm.so.1 \
+    && ln -s libc.so ${MUSL_SYSROOT}/arm-linux-musleabi/lib/ld-musl-arm.so.1
+
+ENV PATH="${MUSL_SYSROOT}/bin:${PATH}"
+ENV MUSL_SYSROOT="${MUSL_SYSROOT}/arm-linux-musleabi"
 
 WORKDIR /workspace
 
-# Default to bash
 CMD ["/bin/bash"]
