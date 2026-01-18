@@ -10,7 +10,7 @@
 
 option(TLALOC_ENABLE_QEMU_TESTS "Enable tests on non-native targets" ON)
 
-set(TLALOC_TEST_COMPONENTS lens soul meld glue)
+set(TLALOC_TEST_COMPONENTS lens meld)
 
 set(MACHINE ${CMAKE_HOST_SYSTEM_PROCESSOR})
 
@@ -26,19 +26,15 @@ if(NOT EXIT_CODE AND COMPILER_TARGET_TRIPLE MATCHES "([^-]+).*")
   set(MACHINE ${CMAKE_MATCH_1})
 endif()
 
-if(${MACHINE} MATCHES "amd64")
-  set(MACHINE x86_64)
-elseif(${MACHINE} MATCHES "i.86")
-  set(MACHINE i686)
-elseif(${MACHINE} MATCHES "^arm.*")
+if(${MACHINE} MATCHES "^arm.*")
   set(MACHINE arm)
 elseif(${MACHINE} STREQUAL "aarch64")
   set(MACHINE aarch64)
 endif()
 
-# IMPORTANT: We use NATIVE_TRIPLE (from -dumpmachine) instead of CMAKE_C_COMPILER
-# because CMAKE_C_COMPILER is a full path (e.g., "/usr/bin/arm-linux-gnueabi-gcc")
-# which would break QEMU sysroot: "/usr/${TRIPLE}" -> "/usr//usr/bin/..." (wrong!)
+# We use NATIVE_TRIPLE (from -dumpmachine) instead of CMAKE_C_COMPILER,
+# CMAKE_C_COMPILER is a full path e.g., /usr/bin/arm-linux-gnueabi-gcc
+# which would break: /usr/${TRIPLE} -> /usr//usr/bin/...
 if(COMPILER_TARGET_TRIPLE)
   set(NATIVE_TRIPLE ${COMPILER_TARGET_TRIPLE})
 else()
@@ -191,11 +187,6 @@ function(add_component_generic_tests COMPONENT ARCH BITS TRIPLE)
   endforeach()
 endfunction()
 
-function(add_component_tests COMPONENT ARCH BITS TRIPLE)
-  add_component_arch_tests(${COMPONENT} ${ARCH} ${BITS} ${TRIPLE})
-  add_component_generic_tests(${COMPONENT} ${ARCH} ${BITS} ${TRIPLE})
-endfunction()
-
 macro(register_all_arch_tests ARCH BITS TRIPLE)
   foreach(COMPONENT IN LISTS TLALOC_TEST_COMPONENTS)
     if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${COMPONENT}")
@@ -230,7 +221,6 @@ elseif(HAS_qemu-aarch64 AND HAS_aarch64-linux-gnu-gcc)
 endif()
 
 message(STATUS "Registered arch-specific tests for ARM32 and AArch64")
-
 
 if(${MACHINE} STREQUAL "aarch64")
   register_all_generic_tests(aarch64 64 ${NATIVE_TRIPLE})

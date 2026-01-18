@@ -22,7 +22,7 @@ ELF interrogation and manipulation utilities for GNU/Linux.
 
 COMPONENTS
     lens      - 'fast' mmap-based ELF parser for ARM32/ARM64
-    soul      - self-erasing userspace loader (not implemented unfortunately -  though was mapped out in good detail)
+    soul      - self-erasing userspace loader (not implemented unfortunately - though was mapped out in great detail)
     meld      - static linker for ARM32 (targeting ARMv7v-a specifically based on the datasheet and ELF spec)
 
 BUILD
@@ -52,15 +52,11 @@ DOCKER
     container, so builds persist after the container exits. --rm
     removes the container after it stops.
 
-    
 TESTS
-    Tests use CMake's ctest. They auto-detect cross-compilers and QEMU.
+    Tests use ctest. Auto-detect cross-compilers and QEMU.
 
     Run all tests:
         cd build && ctest -j$(nproc)
-
-    Run ARM32 tests only:
-        ctest -R "^arm32-"
 
     Run specific test with verbose output:
         ctest -R "arm32-et_exec" -V

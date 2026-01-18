@@ -1,0 +1,27 @@
+/*  Syntax:
+ *   VERSION_TAG {
+ *       global:
+ *           symbol1;
+ *           symbol2;
+ *       local:
+ *           *;
+ *   } [PARENT_VERSION];
+ *
+ * Symbols listed under 'global:' are exported with the specified version tag.
+ * Symbols under 'local:' (typically '*') are hidden.
+ * Parent version enables version inheritance. 
+ * Please see the meld source code for further information.
+ */
+
+LIBVER_1.0 {
+    global:
+        foo;
+        bar;
+    local:
+        *;
+};
+
+LIBVER_2.0 {
+    global:
+        baz;
+} LIBVER_1.0;

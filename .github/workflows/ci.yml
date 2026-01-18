@@ -14,14 +14,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
+ 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
 
-      - name: Configure CMake debug build
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - name: Configure CMake
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE
 
       - name: Build
         run: cmake --build build # Equivalent to `ninja -C build`
@@ -31,10 +31,10 @@ jobs:
           ls -la build/bin/
           file build/bin/lens
 
-      - name: Test lens on itself
+      - name: Test lens on itself # No longer shall you be silent!
         run: |
           # lens can parse any ELF - test it on the compiler
-          build/bin/lens /usr/bin/ls || true
+          build/bin/lens /usr/bin/ls
 
   arm32-build:
     runs-on: ubuntu-24.04
@@ -54,7 +54,7 @@ jobs:
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_SYSTEM_PROCESSOR=arm \
             -DCMAKE_C_COMPILER=arm-linux-gnueabi-gcc \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
             -DCMAKE_C_FLAGS="-march=armv7-a -marm"
 
       - name: Build ARM32
@@ -122,6 +122,37 @@ jobs:
         run: |
           cd build-arm64
           ctest --output-on-failure -j$(nproc)
+
+  meld-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build qemu-user curl
+
+      - name: Install musl cross-compiler
+        run: |
+          curl -fsSL https://musl.cc/arm-linux-musleabi-cross.tgz | sudo tar -xz -C /opt
+          sudo rm -f /opt/arm-linux-musleabi-cross/arm-linux-musleabi/lib/ld-musl-arm.so.1
+          sudo ln -s libc.so /opt/arm-linux-musleabi-cross/arm-linux-musleabi/lib/ld-musl-arm.so.1
+          echo "/opt/arm-linux-musleabi-cross/bin" >> $GITHUB_PATH
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        env:
+          MUSL_SYSROOT: /opt/arm-linux-musleabi-cross/arm-linux-musleabi
+
+      - name: Build meld
+        run: ninja -C build meld
+
+      - name: Run meld tests
+        run: ctest --test-dir build -R meld -V --output-on-failure
+        env:
+          MUSL_SYSROOT: /opt/arm-linux-musleabi-cross/arm-linux-musleabi
 
   static-analysis:
     runs-on: ubuntu-24.04
