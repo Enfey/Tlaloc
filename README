@@ -22,8 +22,9 @@ ELF interrogation and manipulation utilities for GNU/Linux.
 
 COMPONENTS
     lens      - 'fast' mmap-based ELF parser for ARM32/ARM64
-    soul      - self-erasing userspace loader (not implemented unfortunately - though was mapped out in great detail)
+    soul      - self-erasing userspace loader (aiming for implementation summer 2026)
     meld      - static linker for ARM32 (targeting ARMv7v-a specifically based on the datasheet and ELF spec)
+    TBD - ELF injector, and dynamic ELF linker for ARM targets, and perhaps full expansion to AArch64 beyond lens.
 
 BUILD
     One can build themselves, or use .scripts/build-native.sh for native development.
